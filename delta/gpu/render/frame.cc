@@ -29,7 +29,9 @@
 #include "gpu/render/memory/upload_ring.h"
 #include "host/window.h"
 
+#if !defined(DELTA_UWP)
 #include <dlfcn.h>
+#endif
 #include <unistd.h>
 #include <cmath>
 #include <cstdio>
@@ -381,6 +383,9 @@ struct RdocApi {
 // NOLINTEND(readability-identifier-naming)
 
 RdocApi* GetRdocApi() {
+#if defined(DELTA_UWP)
+  return nullptr;
+#else
   static RdocApi* api = []() -> RdocApi* {
     using GetApi = int (*)(u32 version, void** out);
     void* lib = dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD);
@@ -394,6 +399,7 @@ RdocApi* GetRdocApi() {
     return a;
   }();
   return api;
+#endif
 }
 
 int RdocFrame() {

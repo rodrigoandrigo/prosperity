@@ -1,3 +1,6 @@
+#if defined(DELTA_UWP)
+#include "uwp/signals_win.h"
+#endif
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -16,7 +19,7 @@
 #include <intrin.h>
 #endif
 #if defined(DELTA_BACKEND_NATIVE)
-#include <xbyak.h>
+#include "cpu/code_generator.h"
 #endif
 
 #include "base/atomic.h"
@@ -101,7 +104,10 @@ int PS4ABI Lv2UnmappedSyscall() {
 // negative errno, zero-extended by `int` handlers and full-width by `i64` ones
 // (0x00000000_FFFFFFxx or 0xFFFFFFFF_FFFFFFxx; guest pointers live >= 64 GiB
 // and never match). Classify for both the native trampoline and the FEX bridge.
-extern "C" u32 SyscallErrno(u64 raw) {
+extern "C" u32 PS4ABI SyscallErrno(u64 raw) {
+#if defined(DELTA_UWP)
+  uwp::PollSignals();
+#endif
   i32 lo = static_cast<i32>(static_cast<u32>(raw));
   u32 hi = static_cast<u32>(raw >> 32);
   if (lo < 0 && lo >= -static_cast<i32>(SysError::eLAST) &&
@@ -117,7 +123,17 @@ extern "C" u32 SyscallErrno(u64 raw) {
 // context at the bottom, which a handler's host frames walk straight through (a
 // fiber resumed inside glibc free()). 0 = no switch; nesting works because a
 // guest callback's syscalls land on the already-switched stack.
-extern "C" u64 KernelStackTop() {
+extern "C" u64 PS4ABI KernelStackTop() {
+#if defined(DELTA_UWP)
+  uwp::PollSignals();
+#endif
+#if defined(DELTA_UWP)
+  // A POSIX mmap stack is not a Windows fiber/TEB stack. Switching RSP to
+  // an uncommitted view prevents Windows from dispatching its first page
+  // fault. Keep the registered thread stack on Windows until the backend
+  // supplies a Windows stack-switch context.
+  return 0;
+#else
   constexpr size_t kSize = 1u << 20;  // 1 MiB, lazily backed
   struct Stack {
     u8* base = nullptr;
@@ -144,6 +160,7 @@ extern "C" u64 KernelStackTop() {
   // crash.cc GuestStackTrace) still finds the guest frames it is after.
   SetGuestStackScanBase(here);
   return reinterpret_cast<u64>(base + kSize);
+#endif
 }
 
 // DELTA_SCERR_TRACE: emitted (when set) on the trampoline's error path so we
@@ -180,7 +197,11 @@ void DumpSyscallHist() {
 static const bool kScHistDump = [] {
   if (!g_sc_hist)
     return false;
+#if defined(DELTA_UWP)
+  guest::RegisterSessionReset(&DumpSyscallHist);
+#else
   std::atexit(&DumpSyscallHist);
+#endif
   // The emulator is normally SIGKILLed, so also sample on a timer: what a title
   // is doing in STEADY STATE is a different question from what it did at boot,
   // and only a periodic dump answers it.
@@ -196,14 +217,14 @@ static const bool kScHistDump = [] {
 #if defined(DELTA_SYSCALL_ZONES)
 // Each syscall is a Tracy zone named after it, on the guest thread that made
 // it: where a guest thread blocks, and which calls cost, is on the timeline.
-extern "C" u64 SyscallZoneBegin(const ___tracy_source_location_data* where) {
+extern "C" u64 PS4ABI SyscallZoneBegin(const ___tracy_source_location_data* where) {
   const TracyCZoneCtx ctx = ___tracy_emit_zone_begin(where, 1);
   u64 packed;
   std::memcpy(&packed, &ctx, sizeof(packed));
   return packed;
 }
 
-extern "C" void SyscallZoneEnd(u64 packed) {
+extern "C" void PS4ABI SyscallZoneEnd(u64 packed) {
   TracyCZoneCtx ctx;
   std::memcpy(&ctx, &packed, sizeof(ctx));
   ___tracy_emit_zone_end(ctx);
@@ -251,7 +272,7 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
   // longjmp check rejects a jump to a frame that is not on the current stack.
   // Neither needs the room anyway.
   const bool own_stack = sid != 1 /*exit*/ && sid != 431 /*thr_exit*/;
-  struct BsdRet : Xbyak::CodeGenerator {
+  struct BsdRet : cpu::CodeGenerator {
     BsdRet(uintptr_t handler,
            u32 sid,
            bool trace,
@@ -363,7 +384,7 @@ static uintptr_t EmitBsdTrampoline(const void* handler,
       ret();
     }
   };
-  static base::Vector<Xbyak::CodeGenerator*> generators;
+  static base::Vector<cpu::CodeGenerator*> generators;
   static const guest::SessionReset reset_generators([] {
     for (auto* generator : generators)
       delete generator;

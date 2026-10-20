@@ -19,11 +19,11 @@ namespace kern {
 
 class SocketDevice : public Device {
  public:
-  SocketDevice(ObjectTable& objects, int host_fd, int guest_family);
+  SocketDevice(ObjectTable& objects, intptr_t host_fd, int guest_family);
   ~SocketDevice();
 
   // The host fd, for the event queue's readability poll.
-  int HostFd() const { return fd_; }
+  intptr_t HostFd() const { return fd_; }
 
   int Bind(const void* guest_addr, u32 len);
   int Getsockname(void* guest_addr, u32* len);
@@ -48,7 +48,7 @@ class SocketDevice : public Device {
   i32 Ioctl(u32 command, void* args) override;
 
  private:
-  int fd_ = -1;
+  intptr_t fd_ = -1;
   int family_ = 0;  // the guest's AF_*, needed to rebuild replies
 };
 

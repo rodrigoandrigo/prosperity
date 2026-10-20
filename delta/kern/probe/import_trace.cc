@@ -31,7 +31,7 @@
 #include "options/options.h"
 
 #if defined(DELTA_BACKEND_NATIVE)
-#include <xbyak.h>
+#include "cpu/code_generator.h"
 #endif
 
 namespace {
@@ -54,7 +54,7 @@ constexpr u64 kNamedCalls = 6;
 Traced g_traced[kMaxTraced];
 base::Atomic<u32> g_traced_n{0};
 #if defined(DELTA_BACKEND_NATIVE)
-base::Vector<Xbyak::CodeGenerator*> g_stubs;
+base::Vector<cpu::CodeGenerator*> g_stubs;
 #endif
 
 struct Call {
@@ -188,8 +188,8 @@ uintptr_t MaybeTraceImport(const char* nid_name, uintptr_t real_addr) {
   // is 8 mod 16. Keep every argument register, rax (a variadic call's vector
   // count) and xmm0-7, then leave through r11, the one register the ABI lets
   // a PLT stub clobber.
-  struct Stub : Xbyak::CodeGenerator {
-    Stub(u64 index, uintptr_t target) : Xbyak::CodeGenerator(256) {
+  struct Stub : cpu::CodeGenerator {
+    Stub(u64 index, uintptr_t target) : cpu::CodeGenerator(256) {
       push(rbp);
       mov(rbp, rsp);
       for (const auto& r : {rdi, rsi, rdx, rcx, r8, r9, rax, r10})

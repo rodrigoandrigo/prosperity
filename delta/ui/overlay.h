@@ -30,6 +30,9 @@ void OverlayBuildFrame(u32 w,
                        u64 vram_total,
                        bool frame_stalled = false);
 
+// Build contents inside an already begun ImGui frame, in logical units.
+void OverlayBuildContents(u32 w, u32 h, bool frame_stalled = false);
+
 // Show/hide the overlay (bound to F1 by the window event pump).
 void OverlayToggle();
 

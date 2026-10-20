@@ -1,5 +1,5 @@
 #if defined(DELTA_BACKEND_NATIVE)
-#include <xbyak.h>
+#include "cpu/code_generator.h"
 
 #include "base/containers/hash_map.h"
 #include "base/threading/lock_guard.h"
@@ -10,7 +10,7 @@
 
 namespace cpu {
 namespace {
-class HostThunk final : public Xbyak::CodeGenerator {
+class HostThunk final : public cpu::CodeGenerator {
  public:
   HostThunk(uintptr_t target, bool stack_arguments) : CodeGenerator(2048) {
     push(rbp);

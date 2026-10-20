@@ -1,0 +1,10 @@
+<Solution>
+  <Configurations>
+    <Platform Name="ARM64" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Prosperity-UWP.vcxproj" Id="74f5168c-f069-4cca-8e44-02755f01428d">
+    <Deploy />
+  </Project>
+</Solution>

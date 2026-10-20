@@ -55,7 +55,9 @@ const Row kRows[] = {
     {"Right Shift", "R2"},
     {"Enter / P", "Options  (start)"},
     {"Tab", "Touchpad  (map)"},
+#if !defined(DELTA_UWP)
     {"F3", "Mouse look on / off"},
+#endif
 #if defined(DELTA_MEMORY_DEBUG)
     {"F4", "Memory: off / compact / full"},
 #endif
@@ -118,6 +120,9 @@ void BuildLegend() {
 }  // namespace
 
 void OverlayEnsureImGui() {
+#if defined(DELTA_UWP)
+  if (ImGui::GetCurrentContext()) return;
+#endif
   if (g_inited)
     return;
   const memory_debug::Scope memory_scope(memory_debug::Bucket::kDebugger);
@@ -159,6 +164,11 @@ void OverlayBuildFrame(u32 w,
   io.DisplaySize = ImVec2((float)w, (float)h);
   io.DeltaTime = 1.0f / 60.0f;
   ImGui::NewFrame();
+  OverlayBuildContents(w, h, frame_stalled);
+  ImGui::Render();
+}
+
+void OverlayBuildContents(u32 w, u32 h, bool frame_stalled) {
   if (HomeScreenActive()) {
     HomeScreenBuild(w, h);
   } else if (PauseMenuVisible()) {
@@ -187,7 +197,6 @@ void OverlayBuildFrame(u32 w,
     if (!MemoryOverlayFull())
       OverlayBusyBuild(w, h, frame_stalled);
   }
-  ImGui::Render();
 }
 
 void OverlayToggle() {

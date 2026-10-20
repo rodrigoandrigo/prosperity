@@ -5,7 +5,9 @@
 #include "gpu/render/backend.h"
 #include "gpu/render/renderer.h"
 
+#if !defined(DELTA_UWP)
 #include "gpu/vulkan/vk_rhi.h"
+#endif
 #include "options/options.h"
 #if DELTA_GPU_OPENGL
 #include "gpu/opengl/gl_rhi.h"
@@ -25,7 +27,9 @@ namespace gpu::render {
 
 base::Vector<rhi::Backend> CompiledBackends() {
   return {
+#if !defined(DELTA_UWP)
       rhi::Backend::kVulkan,
+#endif
 #if DELTA_GPU_OPENGL
       rhi::Backend::kOpenGL,
 #endif
@@ -49,6 +53,7 @@ base::UniquePointer<rhi::Device> CreateBackendDevice(
       options.cache_dir ? base::String(options.cache_dir) + "/pipeline.bin"
                         : base::String();
   switch (backend) {
+#if !defined(DELTA_UWP)
     case rhi::Backend::kVulkan: {
       vk::VulkanOptions vo;
       vo.gpu_filter = options.gpu_filter;
@@ -62,6 +67,7 @@ base::UniquePointer<rhi::Device> CreateBackendDevice(
       vo.pipeline_cache_path = cache.empty() ? nullptr : cache.c_str();
       return vk::CreateVulkanDevice(vo);
     }
+#endif
 #if DELTA_GPU_OPENGL
     case rhi::Backend::kOpenGL: {
       opengl::OpenGLOptions go;

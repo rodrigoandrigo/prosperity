@@ -8,6 +8,12 @@
  */
 
 #include <csetjmp>
+#if defined(_WIN32)
+#include <windows.h>
+#include <winternl.h>
+#include <cstddef>
+#include <stdexcept>
+#endif
 #include "base/arch.h"
 #include "base/containers/vector.h"
 #include "cpu/backend.h"
@@ -16,9 +22,42 @@
 #include "kern/crash.h"
 #include "kern/module.h"
 #include "memory_debug/memory_debug.h"
+#if defined(_WIN32)
+// Guest frames and stack switches have no Windows unwind metadata. A null
+// frame requests direct restoration rather than RtlUnwind across guest code.
+#define GUEST_SETJMP(buffer) _setjmp(buffer, nullptr)
+#else
+#define GUEST_SETJMP(buffer) setjmp(buffer)
+#endif
 
 namespace cpu {
 
+#if defined(_WIN32)
+namespace {
+struct HostTls {
+  DWORD base = TlsAlloc();
+  DWORD scratch = TlsAlloc();
+  HostTls() {
+    // Lifted accesses use the inline TEB slots, never the Linux FS segment.
+    // Expansion slots require another level of indirection; reject that case
+    // before executing guest code instead of generating a wrong displacement.
+    if (base >= 64 || scratch >= 64) {
+      if (base != TLS_OUT_OF_INDEXES) TlsFree(base);
+      if (scratch != TLS_OUT_OF_INDEXES) TlsFree(scratch);
+      throw std::runtime_error("No inline Windows TLS slots available for guest execution");
+    }
+  }
+};
+HostTls& Slots() { static HostTls slots; return slots; }
+}
+i32 HostGuestFsOffset() { return offsetof(TEB, TlsSlots) + Slots().base * sizeof(void*); }
+i32 HostFsScratchOffset() { return offsetof(TEB, TlsSlots) + Slots().scratch * sizeof(void*); }
+u64 ThreadFsBase() { return reinterpret_cast<uintptr_t>(TlsGetValue(Slots().base)); }
+void SetThreadFsBase(u64 value) {
+  if (!TlsSetValue(Slots().base, reinterpret_cast<void*>(value)))
+    throw std::runtime_error("Could not set guest TLS base");
+}
+#else
 // Per-thread guest fs base and spill slot used by stackless FS lift stubs.
 __attribute__((tls_model("initial-exec"))) static thread_local u64 t_fsbase = 0;
 __attribute__((
@@ -43,6 +82,7 @@ i32 HostFsScratchOffset() {
 void SetThreadFsBase(u64 v) {
   t_fsbase = v;
 }
+#endif
 
 }  // namespace cpu
 
@@ -103,7 +143,7 @@ class NativeBackend final : public Backend {
     // guest entry may also just return naturally (setjmp returns 0 first time).
     std::jmp_buf jb;
     t_exit_jmp = &jb;
-    if (setjmp(jb) == 0) {
+    if (GUEST_SETJMP(jb) == 0) {
       guest::SetThreadExitHandler(&ExitGuestThread);
       guest::PausePoint();
       reinterpret_cast<void(PS4ABI*)(void*)>(entry)(arg);
@@ -118,7 +158,7 @@ class NativeBackend final : public Backend {
     auto* previous = t_exit_jmp;
     t_exit_jmp = &jb;
     u64 result = 0;
-    if (setjmp(jb) == 0) {
+    if (GUEST_SETJMP(jb) == 0) {
       guest::SetThreadExitHandler(&ExitGuestThread);
       guest::PausePoint();
       result = reinterpret_cast<u64(PS4ABI*)(u64, u64, u64, u64)>(fn)(a0, a1,
@@ -165,7 +205,11 @@ uintptr_t MakeGuestTrampoline(const void* fn_bytes,
   return reinterpret_cast<uintptr_t>(const_cast<void*>(fn_bytes));
 }
 
-void EarlyInit() {}  // native: nothing to segregate
+void EarlyInit() {
+#if defined(_WIN32)
+  (void)Slots();
+#endif
+}
 
 Backend& GetBackend() {
   static NativeBackend instance;

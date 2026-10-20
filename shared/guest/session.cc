@@ -13,6 +13,10 @@
 #include "base/threading/mutex.h"
 #include "base/threading/thread.h"
 #include "guest/pause.h"
+#if defined(DELTA_UWP)
+#include "embedding/host.h"
+#include <exception>
+#endif
 
 namespace guest {
 namespace {
@@ -40,6 +44,12 @@ void* Run(void* pointer) {
   try {
     thread->run();
   } catch (const StopWorker&) {
+#if defined(DELTA_UWP)
+  } catch (const std::exception& error) {
+    embedding::ReportFailure(error.what()); RequestStop();
+  } catch (...) {
+    embedding::ReportFailure("Unhandled guest worker error"); RequestStop();
+#endif
   }
   t_worker = false;
   g_live.fetch_sub(1);

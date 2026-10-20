@@ -17,14 +17,18 @@ namespace kern::probe {
 
 // Offered every signal before the crash reporter looks at it. True means a
 // probe owned this trap and the guest must be resumed rather than dumped.
+#if !defined(DELTA_UWP)
 bool OnSignal(int sig, siginfo_t* si, void* ucv);
+#endif
 
 // The reporter is about to print a fatal dump; flush what a probe has
 // accumulated that would otherwise die with the process.
 void OnFatal();
 
 // Points `pa` at the SIGUSR1 handler that dumps a thread's guest backtrace.
+#if !defined(DELTA_UWP)
 void InstallThreadProbeHandler(struct sigaction& pa);
+#endif
 
 // Enable the DELTA_ALLOC_TRACE allocator-entry tracer: addr's first byte must
 // be `push rbp` (0x55); the caller plants an int3 there and this records addr

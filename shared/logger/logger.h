@@ -7,6 +7,12 @@
 #include "base/strings/string_ref.h"
 #include "base/strings/xstring.h"
 #include "base/time/time.h"
+#if defined(DELTA_UWP)
+#include "embedding/host.h"
+#define LOGGER_ASSERT_FAILURE() embedding::Fail("Core assertion failed; see prosperity.log")
+#else
+#define LOGGER_ASSERT_FAILURE() __builtin_trap()
+#endif
 
 // log impl is heavily influenced & based on the yuzu logger
 
@@ -107,7 +113,7 @@ inline void FmtLogMsg(LogLevel lvl,
     if (!(expression)) {                                                  \
       ::logger::FmtLogMsg(::logger::LogLevel::kError, __LINE__, __func__, \
                           "assertion failed at " #expression);            \
-      __builtin_trap();                                                   \
+      LOGGER_ASSERT_FAILURE();                                          \
     }                                                                     \
                                                                           \
   } while (0)

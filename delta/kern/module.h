@@ -126,6 +126,7 @@ class Module {
 
   // Imports that landed on the badcall stub the last time ResolveImports ran,
   // i.e. slots a module loaded later could still satisfy.
+  inline bool HasUnresolvedRelocations() const { return !unresolved_relocations_.empty(); }
   inline bool HasUnresolvedImports() const { return unresolved_imports_ != 0; }
 
   bool Unload();
@@ -245,6 +246,7 @@ class Module {
   // are additive (+=), so a second pass (the harness relocates, then the guest
   // libkernel calls syscall 599 too) would double the module's TLS index.
   bool relocated_ = false;
+  base::Vector<u32> unresolved_relocations_;
 
   u32 unresolved_imports_ = 0;
   bool imports_bound_ = false;

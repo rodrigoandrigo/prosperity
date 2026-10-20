@@ -1,3 +1,4 @@
+#include "host_network.h"
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -109,8 +110,8 @@ static void WatchSocket(u32 fd) {
     for (;;) {
       fd_set rd;
       FD_ZERO(&rd);
-      int max_fd = -1;
-      base::Vector<base::Pair<u32, int>> live;
+      intptr_t max_fd = -1;
+      base::Vector<base::Pair<u32, intptr_t>> live;
       {
         base::LockGuard<base::Mutex> lk(g_watch_m);
         for (u32 g : g_watched)
@@ -121,7 +122,7 @@ static void WatchSocket(u32 fd) {
           }
       }
       timeval tv{0, 20000};  // 20 ms; also the retry tick when nothing is live
-      if (max_fd < 0 || ::select(max_fd + 1, &rd, nullptr, nullptr, &tv) <= 0) {
+      if (max_fd < 0 || host_network::Select(max_fd + 1, &rd, nullptr, nullptr, &tv) <= 0) {
         guest::SleepForMilliseconds(5);
         continue;
       }

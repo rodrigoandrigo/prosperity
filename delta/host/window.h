@@ -95,6 +95,7 @@ struct PadKeys {
   bool l3 = false, r3 = false;
   bool options = false, touchpad = false;
   u8 lx = 128, ly = 128, rx = 128, ry = 128;
+  u8 l2_axis = 0, r2_axis = 0;
 };
 // Fill `out` from the current keyboard state. Returns false if no window
 // exists.

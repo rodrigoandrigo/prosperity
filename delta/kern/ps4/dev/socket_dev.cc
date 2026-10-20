@@ -1,3 +1,4 @@
+#include "host_network.h"
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -107,12 +108,12 @@ int FromErrno() {
 
 }  // namespace
 
-SocketDevice::SocketDevice(ObjectTable& objects, int host_fd, int guest_family)
+SocketDevice::SocketDevice(ObjectTable& objects, intptr_t host_fd, int guest_family)
     : Device(objects), fd_(host_fd), family_(guest_family) {}
 
 SocketDevice::~SocketDevice() {
   if (fd_ >= 0)
-    ::close(fd_);
+    host_network::Close(fd_);
 }
 
 int SocketDevice::Bind(const void* guest_addr, u32 len) {
@@ -120,14 +121,14 @@ int SocketDevice::Bind(const void* guest_addr, u32 len) {
   socklen_t n = ToHost(guest_addr, len, sa);
   if (!n)
     return -SysError::eINVAL;
-  return ::bind(fd_, reinterpret_cast<sockaddr*>(&sa), n) == 0 ? 0
+  return host_network::Bind(fd_, reinterpret_cast<sockaddr*>(&sa), n) == 0 ? 0
                                                                : FromErrno();
 }
 
 int SocketDevice::Getsockname(void* guest_addr, u32* len) {
   sockaddr_storage sa;
   socklen_t n = sizeof(sa);
-  if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&sa), &n) != 0)
+  if (host_network::Getsockname(fd_, reinterpret_cast<sockaddr*>(&sa), &n) != 0)
     return FromErrno();
   u32 wrote = ToGuest(sa, guest_addr, len ? *len : 0);
   if (len)
@@ -143,8 +144,8 @@ i64 SocketDevice::Sendto(const void* buf,
   sockaddr_storage sa;
   socklen_t n = ToHost(guest_addr, addr_len, sa);
   ssize_t r =
-      n ? ::sendto(fd_, buf, len, flags, reinterpret_cast<sockaddr*>(&sa), n)
-        : ::send(fd_, buf, len, flags);
+      n ? host_network::Sendto(fd_, buf, len, flags, reinterpret_cast<sockaddr*>(&sa), n)
+        : host_network::Send(fd_, buf, len, flags);
   return r >= 0 ? r : FromErrno();
 }
 
@@ -157,12 +158,12 @@ i64 SocketDevice::Recvfrom(void* buf,
   socklen_t n = sizeof(sa);
   host_memory::BeforeHostWrite(buf, len);
   const bool nonblocking =
-      (flags & MSG_DONTWAIT) || (fcntl(fd_, F_GETFL) & O_NONBLOCK);
+      (flags & MSG_DONTWAIT) || host_network::Nonblocking(fd_);
   ssize_t r;
   for (;;) {
     if (guest::Stopping())
       return -SysError::eINTR;
-    r = ::recvfrom(fd_, buf, len, flags | MSG_DONTWAIT,
+    r = host_network::Recvfrom(fd_, buf, len, flags | MSG_DONTWAIT,
                    reinterpret_cast<sockaddr*>(&sa), &n);
     if (r >= 0 || nonblocking || (errno != EAGAIN && errno != EWOULDBLOCK))
       break;

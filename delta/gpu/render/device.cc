@@ -25,7 +25,11 @@
 #include "gpu/render/memory/upload_ring.h"
 
 namespace {
+#if defined(DELTA_UWP)
+DELTA_OPTION(const char*, kBackend, "DELTA_GPU_BACKEND", "d3d12");
+#else
 DELTA_OPTION(const char*, kBackend, "DELTA_GPU_BACKEND", "vulkan");
+#endif
 DELTA_OPTION(const char*, kVkGpu, "DELTA_VK_GPU", nullptr);
 DELTA_OPTION(bool, kCheckpoints, "DELTA_GPU_CHECKPOINTS", false);
 DELTA_OPTION(bool, kShaderCacheOn, "DELTA_GPU_SHADER_CACHE", true);
@@ -69,10 +73,14 @@ bool ParseBackend(const char* name, rhi::Backend& out) {
 }  // namespace
 
 bool CreateDevice() {
+#if defined(DELTA_UWP)
+  rhi::Backend backend = rhi::Backend::kD3D12;
+#else
   rhi::Backend backend = rhi::Backend::kVulkan;
+#endif
   if (!ParseBackend(kBackend, backend))
-    BASE_LOGI("gpu", "backend '{}' is not compiled in; using vulkan",
-              kBackend ? kBackend : "");
+    BASE_LOGI("gpu", "backend '{}' is not compiled in; using {}",
+              kBackend ? kBackend : "", rhi::BackendName(backend));
   render::BackendOptions options;
   options.gpu_filter = kVkGpu;
   options.debug_labels = WantDebugUtils() || trace::WantValidation();
@@ -125,7 +133,9 @@ bool Init(Renderer& renderer) {
     BASE_LOGI("gpu", "no usable graphics device; gpu disabled");
     return false;
   }
+#if !defined(DELTA_UWP)
   std::atexit([] { g_backend.presenter.Stop(); });
+#endif
   renderer.state = &g_backend;
   return true;
 }

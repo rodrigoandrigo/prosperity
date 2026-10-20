@@ -648,7 +648,9 @@ bool Dispatch(Renderer& renderer, ComputeInfo& ci) {
       for (const auto& kv : tbl)
         BASE_LOGI("cshist", "{:#x} size={:#x} x{}", (unsigned long)kv.first,
                   (unsigned long)kv.second.size, (unsigned long)kv.second.n);
-      std::fflush(stderr);
+      #if !defined(DELTA_UWP)
+  std::fflush(stderr);
+#endif
     }
   }
   static u32 cs_listed = 0;

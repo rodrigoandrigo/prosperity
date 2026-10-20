@@ -4,7 +4,8 @@
  * PS4Delta : PS4 emulation and research project
  *
  * Host audio output bridge used by the kernel audio consumer.
- * SDL3 owns playback streams. On Android these operations are no-ops.
+ * SDL3 owns desktop playback streams; UWP uses native XAudio2 source voices.
+ * On Android these operations are no-ops.
  */
 
 #include "base/arch.h"

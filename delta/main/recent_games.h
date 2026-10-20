@@ -7,6 +7,7 @@
 namespace cli {
 
 base::Vector<ui::HomeGame> ReadRecentGames();
+bool ForgetGame(const base::String& path);
 void RememberGame(const base::String& path,
                   const base::String& name,
                   const base::String& title_id,

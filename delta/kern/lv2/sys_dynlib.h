@@ -75,12 +75,7 @@ int PS4ABI sys_dynlib_get_list(u32* handles, size_t max_count, size_t* count);
 int PS4ABI sys_dynlib_dlsym(u32 handle, const char* cname, void** sym);
 int PS4ABI sys_dynlib_get_obj_member(u32 handle, u8 index, void** value);
 int PS4ABI sys_dynlib_process_needed_and_relocate();
-int PS4ABI sys_dynlib_load_prx(const char* path,
-                               u64 arg2,
-                               int* p_handle,
-                               u64 arg4,
-                               const void* opt,
-                               i64* p_res);
+int PS4ABI sys_dynlib_load_prx(const char* path, u64 flags, int* p_handle);
 int PS4ABI sys_dynlib_unload_prx(u32 handle);
 
 // HLE __tls_get_addr; libkernel's export is patched to this. (See impl.)

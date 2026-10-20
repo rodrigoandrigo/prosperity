@@ -1,6 +1,10 @@
 #include "cpu/mmio.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <ucontext.h>
+#endif
 #include <cstring>
 
 namespace cpu {
@@ -9,9 +13,19 @@ bool HandleMmioWrite(void* signal_context,
                      MmioWrite32 write) {
   if (!signal_context)
     return false;
+#if defined(_WIN32) && defined(__x86_64__)
+  auto* uc = static_cast<CONTEXT*>(signal_context);
+  enum { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
+         REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RIP };
+  u64 regs[] = {uc->Rax, uc->Rcx, uc->Rdx, uc->Rbx, uc->Rsp, uc->Rbp, uc->Rsi, uc->Rdi,
+                uc->R8, uc->R9, uc->R10, uc->R11, uc->R12, uc->R13, uc->R14, uc->R15, uc->Rip};
+#else
   auto* uc = static_cast<ucontext_t*>(signal_context);
+#endif
 #if defined(__x86_64__)
+#if !defined(_WIN32)
   auto* regs = uc->uc_mcontext.gregs;
+#endif
   const auto* code = reinterpret_cast<const u8*>(regs[REG_RIP]);
   static constexpr int kRegisters[] = {
       REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI,
@@ -66,6 +80,9 @@ bool HandleMmioWrite(void* signal_context,
   if (target != address || !write(address, value))
     return false;
   regs[REG_RIP] += length;
+#if defined(_WIN32)
+  uc->Rip = regs[REG_RIP];
+#endif
   return true;
 #elif defined(__aarch64__)
   const u32 instruction = *reinterpret_cast<const u32*>(uc->uc_mcontext.pc);

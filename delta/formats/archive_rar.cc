@@ -42,6 +42,41 @@
 namespace formats {
 namespace {
 
+#if defined(DELTA_UWP)
+// Keep UnRAR on the same brokered FileBase path as ZIP/PKG/ELF. Quick-open
+// performs nonvirtual File reads, so disable it for this adapter (no extraction).
+class ReadArchive final : public Archive {
+ public:
+  explicit ReadArchive(CommandData* command) : Archive(command) { SetProhibitQOpen(true); }
+  bool Open(const std::wstring& name, uint mode = FMF_READ) override {
+    Close();
+    if (mode & (FMF_UPDATE | FMF_WRITE)) return false;
+    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (count <= 0) return false;
+    std::string path(count, 0);
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name.c_str(), -1, path.data(), count, nullptr, nullptr);
+    source_.Reset(io::File(base::String(path.c_str()), io::FileMode::kRead).GetBase());
+    FileName = name; SetProhibitQOpen(true); return source_.IsOpen();
+  }
+  bool Close() override { source_.Close(); return true; }
+  bool IsOpened() override { return source_.IsOpen(); }
+  int Read(void* data, size_t bytes) override {
+    const auto got = source_.Read(data, std::min<size_t>(bytes, INT_MAX));
+    return source_.LastError() < 0 ? -1 : int(got);
+  }
+  void Seek(int64 offset, int method) override {
+    auto mode = method == SEEK_CUR ? io::SeekMode::kSeekCur : method == SEEK_END ? io::SeekMode::kSeekEnd : io::SeekMode::kSeekSet;
+    if (source_.Seek(offset, mode) == UINT64_MAX) throw RARX_READ;
+  }
+  int64 Tell() override { return source_.Tell(); }
+  int64 FileLength() override { return source_.GetSize(); }
+ private:
+  io::File source_;
+};
+#else
+using ReadArchive = Archive;
+#endif
+
 // Decode-ahead per session. Must comfortably exceed the largest single
 // UnpWrite burst, which is bounded by the dictionary flush granularity.
 constexpr size_t kRingSize = 8 << 20;
@@ -189,7 +224,7 @@ extern "C" int RarSessionCallback(UINT msg,
 // container as well.
 struct RarDecoder {
   CommandData cmd;
-  Archive arc{&cmd};
+  ReadArchive arc{&cmd};
   ComprDataIO data_io;
   Unpack unp{&data_io};
   bool opened = false;
@@ -339,7 +374,7 @@ class RarBackend final : public ArchiveBackend {
 bool RarBackend::Index(base::Vector<ArchiveEntry>& out) {
   CommandData cmd;
   cmd.FileArgs.AddString(L"*");
-  Archive arc(&cmd);
+  ReadArchive arc(&cmd);
   try {
     if (!arc.Open(pathW_) || !arc.IsArchive(false))
       return false;

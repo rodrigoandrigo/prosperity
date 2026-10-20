@@ -835,7 +835,9 @@ static rhi::TextureView* ResolveTextureView(u64 base,
                   kv.second.mips, (unsigned long)kv.second.footprint,
                   (unsigned long)nz, (unsigned long)kv.second.binds);
       }
-      std::fflush(stderr);
+      #if !defined(DELTA_UWP)
+  std::fflush(stderr);
+#endif
     }
   }
   if (kTexRaw && w >= 256 && h >= 128 &&

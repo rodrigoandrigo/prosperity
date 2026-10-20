@@ -12,6 +12,11 @@
 #include <Windows.h>
 #include <cstring>
 #include <cwchar>
+#if defined(DELTA_UWP)
+#include <mutex>
+#include <string>
+#include <stdexcept>
+#endif
 #else
 #include <unistd.h>
 #include <climits>
@@ -30,6 +35,37 @@ DELTA_OPTION(const char*, kDataDir, "DELTA_DATA_DIR", nullptr);
 namespace io {
 
 #ifdef _WIN32
+#if defined(DELTA_UWP)
+namespace {
+std::mutex g_directory_mutex;
+base::String g_directory;
+}
+void SetDataDirectory(const char* directory) {
+  if (!directory || !*directory) throw std::invalid_argument("Missing UWP data directory");
+  std::lock_guard lock(g_directory_mutex);
+  g_directory = directory;
+  if (g_directory.back() != '/' && g_directory.back() != '\\') g_directory += "/";
+}
+base::String MakeAbsPath(const base::String& relative) {
+  std::lock_guard lock(g_directory_mutex);
+  if (g_directory.empty()) throw std::logic_error("UWP data directory has not been configured");
+  base::String path = g_directory;
+  path += relative;
+  return path;
+}
+base::StringW MakeAbsPath(const base::StringW& relative) {
+  const auto directory = MakeAbsPath(base::String());
+  const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+      directory.data(), static_cast<int>(directory.size()), nullptr, 0);
+  if (!count) throw std::runtime_error("Invalid UTF-8 data directory");
+  base::StringW path;
+  path.resize(count);
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, directory.data(),
+      static_cast<int>(directory.size()), path.data(), count);
+  path += relative;
+  return path;
+}
+#else
 base::StringW MakeAbsPath(const base::StringW& rel) {
   static base::StringW filePath;
   if (filePath.empty()) {
@@ -71,6 +107,7 @@ base::String MakeAbsPath(const base::String& rel) {
   return out;
 }
 
+#endif
 #else  // POSIX
 
 static const base::String& ExeDir() {

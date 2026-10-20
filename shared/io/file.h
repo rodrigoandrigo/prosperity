@@ -46,6 +46,7 @@ class FileBase {
   virtual u64 Tell() = 0;
   virtual u64 GetSize() = 0;
   virtual NativeHandle GetNativeHandle() = 0;
+  virtual int32_t LastError() const { return 0; }
 };
 
 class File {
@@ -86,6 +87,7 @@ class File {
   inline u64 GetSize() { return file_->GetSize(); }
   inline u64 Tell() { return file_->Tell(); }
   inline NativeHandle GetNativeHandle() { return file_->GetNativeHandle(); }
+  inline int32_t LastError() const { return file_ ? file_->LastError() : -4; }
   inline bool IsOpen() { return file_ && file_->IsOpen(); }
   inline bool Exists() { return static_cast<bool>(file_); }
 

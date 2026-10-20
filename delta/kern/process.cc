@@ -133,7 +133,7 @@ ModulePtr Process::GetModule(u32 handle) {
 // is meant to get its storage lazily when the renderer registers the base
 // surfaces
 // ("Floor Surface"/"Wall Surface"). That renderer path is gated on the Gnm->
-ModulePtr Process::LoadModule(base::StringRef name) {
+ModulePtr Process::LoadModule(base::StringRef name, const char* requested_path) {
   const bool is_ps4_gnm_driver =
       plat_ == Platform::kPs4 &&
       (name == base::StringRef("libSceGnmDriver") ||
@@ -154,6 +154,14 @@ ModulePtr Process::LoadModule(base::StringRef name) {
   base::String sname;
   sname.append(name.data(), name.length());
 
+  // Dynamic loads may name application modules outside sce_module. Preserve
+  // that VFS path instead of reducing it to a firmware-style basename.
+  if (requested_path && requested_path[0] == '/' && vfs::OpenRead(requested_path).Exists()) {
+    if (!lib->FromVfs(base::String(requested_path))) return nullptr;
+    probe::OnModuleLoaded(*lib, name);
+    return lib;
+  }
+
   // PS5 titles use a coherent Prospero module set: system modules from a
   // firmware dump (DELTA_PS5_MODULES, a ':'-separated list of dirs holding
   // <name>.sprx), the title's own SDK modules from its decrypted/ tree. A PS5
@@ -164,7 +172,11 @@ ModulePtr Process::LoadModule(base::StringRef name) {
     bool ok = false;
     if (const char* env = kPs5Modules) {
       for (const char* p = env; *p && !ok;) {
+        #if defined(DELTA_UWP)
+        const char* sep = std::strchr(p, ';');
+#else
         const char* sep = std::strchr(p, ':');
+#endif
         size_t len = sep ? static_cast<size_t>(sep - p) : std::strlen(p);
         if (len) {
           base::String dir;
@@ -227,17 +239,17 @@ ModulePtr Process::LoadModule(base::StringRef name) {
     // /app0/sce_module rather than using the firmware copies. The firmware-
     // derived classification used here is documented by shadPS4:
     // https://github.com/shadps4-emu/shadPS4/blob/2c9caf6bfbe7e1dc7a1b4565af8d84c56469dd56/src/core/libraries/sysmodule/sysmodule_table.h#L363-L372
-    const char* roots[] = {"/app0/sce_module/", "/app0/"};
+    const char* roots[] = {"/app0/sce_module/", "/app0/", "/app0/Media/Modules/"};
     for (const char* root : roots) {
-      base::String vfs_path(root);
-      vfs_path.append(name.data(), name.length());
-      vfs_path += ".prx";
-      if (!vfs::OpenRead(vfs_path.c_str()).Exists())
-        continue;
-      if (!lib->FromVfs(vfs_path))
-        return false;
-      probe::OnModuleLoaded(*lib, name);
-      return true;
+      for (const char* extension : {".prx", ".sprx"}) {
+        base::String vfs_path(root);
+        vfs_path.append(name.data(), name.length());
+        vfs_path += extension;
+        if (!vfs::OpenRead(vfs_path.c_str()).Exists()) continue;
+        if (!lib->FromVfs(vfs_path)) return false;
+        probe::OnModuleLoaded(*lib, name);
+        return true;
+      }
     }
     return false;
   };

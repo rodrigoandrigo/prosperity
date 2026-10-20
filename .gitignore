@@ -1,6 +1,7 @@
 
 bin/
 build/
+Prosperity-UWP/Runtime/
 _ignore/
 .vscode
 

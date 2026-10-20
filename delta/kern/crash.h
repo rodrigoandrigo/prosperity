@@ -22,6 +22,9 @@ void SetCsRangeDescriber(CsRangeDescriber fn);
 // Install signal handlers that symbolize a guest fault (rip + frame-pointer
 // backtrace) to <module>+offset using the loaded module table, then exit.
 void InstallCrashHandler();
+#if defined(DELTA_UWP)
+void UninstallCrashHandler();
+#endif
 
 // Resolve a host/guest address to "<module>+offset (.text/.data)" via the
 // loaded module table (or "0x.. (??)" if unmapped). Exposed for targeted

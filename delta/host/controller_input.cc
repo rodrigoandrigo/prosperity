@@ -663,8 +663,8 @@ void FillControllerState(guest::ControllerState* d) {
   d->ly = ly;
   d->rx = rx;
   d->ry = ry;
-  d->l2 = (buttons & kL2) ? 255 : 0;
-  d->r2 = (buttons & kR2) ? 255 : 0;
+  d->l2 = k.l2_axis ? k.l2_axis : (buttons & kL2) ? 255 : 0;
+  d->r2 = k.r2_axis ? k.r2_axis : (buttons & kR2) ? 255 : 0;
   d->timestamp = (base::TimeTicks::Now() - base::TimeTicks()).InMicroseconds();
   ++g_input.read_seq;
   if (kPadAutoskip && (g_input.read_seq % 600 == 1))

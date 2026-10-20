@@ -25,6 +25,10 @@
 #include "gpu/write_tracker.h"
 #include "host_memory/host_memory.h"
 #include "options/options.h"
+#if defined(DELTA_UWP)
+#include "uwp/memory_win.h"
+#include "embedding/host.h"
+#endif
 
 namespace gpu::render {
 namespace {
@@ -107,6 +111,10 @@ u64 g_periodic_at = 0;
 int g_init_state = -1;
 
 int FindDmemFd() {
+#if defined(DELTA_UWP)
+  uint64_t size;
+  return uwp::FindMemoryFile("delta_dmem", size);
+#else
   DIR* dir = opendir("/proc/self/fd");
   if (!dir)
     return -1;
@@ -125,6 +133,7 @@ int FindDmemFd() {
   }
   closedir(dir);
   return found;
+#endif
 }
 
 u64 g_maps_read_at = ~0ull;
@@ -140,10 +149,15 @@ void AttachDirectAlias(bool force = false) {
     return;
   g_alias_probe_at = generation;
   const int fd = FindDmemFd();
+#if defined(DELTA_UWP)
+  uint64_t size;
+  if (fd < 0 || uwp::FindMemoryFile("delta_dmem", size) != fd || !size) return;
+#else
   struct stat st;
   if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0)
     return;
   const u64 size = static_cast<u64>(st.st_size);
+#endif
   void* alias = mmap(nullptr, size, PROT_READ | PROT_WRITE,
                      MAP_SHARED | MAP_NORESERVE, fd, 0);
   if (alias == MAP_FAILED)
@@ -174,14 +188,24 @@ void ReadMaps(bool force = false, u64 lo = 0, u64 hi = ~0ull) {
     base::LockGuard lock(g_remap_lock);
     g_maps_dirty.clear();
   }
+#if !defined(DELTA_UWP)
   FILE* f = std::fopen("/proc/self/maps", "r");
   if (!f)
     return;
+#endif
   g_maps_read_at = generation;
   g_maps_changed = true;
   ++g_map_snapshot;
   g_host_maps.clear();
   g_maps.clear();
+#if defined(DELTA_UWP)
+  for (const auto& map : uwp::MemoryMaps()) {
+    Mapping entry{map.begin, map.end, map.offset, (map.protection & PROT_READ) != 0,
+        (map.protection & PROT_WRITE) != 0};
+    if (map.direct) g_maps.push_back(entry);
+    else if (GuestDirectIndex(map.begin) != ~0ull) g_host_maps.push_back(entry);
+  }
+#else
   char line[512];
   while (std::fgets(line, sizeof(line), f)) {
     unsigned long long start, end, offset;
@@ -203,6 +227,7 @@ void ReadMaps(bool force = false, u64 lo = 0, u64 hi = ~0ull) {
     g_maps.push_back({start, end, offset});
   }
   std::fclose(f);
+#endif
 }
 
 bool DirtyTouchesGpu() {
@@ -454,9 +479,18 @@ HostImport* HostImportAt(u64 address, u64* base, bool retry = true) {
     }
     return nullptr;
   }
-  if (!writable)
+  if (!writable) {
+#if defined(DELTA_UWP)
+    if (!uwp::ReadMemory(buffer->mapped(), reinterpret_cast<const void*>(start), desc.size)) {
+      Device().Destroy(buffer);
+      const auto* reason = uwp::MemoryFaultError();
+      embedding::Fail(reason ? reason : "Unable to read guest memory for GPU upload");
+    }
+#else
     std::memcpy(buffer->mapped(), reinterpret_cast<const void*>(start),
                 desc.size);
+#endif
+  }
   *base = start;
   if (auto previous = g_host_imports.find(start);
       previous != g_host_imports.end()) {

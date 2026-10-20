@@ -1,3 +1,4 @@
+#include "host_network.h"
 // Copyright (C) Force67 2019
 
 #include <sys/socket.h>
@@ -98,7 +99,7 @@ int PS4ABI sys_socket(i32 domain, i32 type, i32 protocol) {
   // API returns 0x804101c8 and the PS5 Np stack can't start.
   if (host_domain != -1 &&
       (type == kBsdSockDgram || type == kSceSockDgramP2p)) {
-    int fd = ::socket(host_domain, SOCK_DGRAM, 0);
+    auto fd = host_network::Socket(host_domain, SOCK_DGRAM, 0);
     if (fd >= 0) {
       auto* dev =
           new SocketDevice(Process::GetActive()->GetObjTable(), fd, domain);

@@ -7,6 +7,7 @@
  */
 
 #include "base/arch.h"
+#include "host_memory/host_memory.h"
 #include "base/logging.h"
 
 #include <cstdio>
@@ -178,6 +179,7 @@ i64 FileDevice::Lseek(i64 off, int whence) {
 // pread: read at an absolute offset without disturbing the file position (the
 // guest keeps its own position for sequential reads). Backs a file mmap.
 i64 FileDevice::ReadAt(void* buf, size_t n, i64 off) {
+  host_memory::BeforeHostWrite(buf, n);
   std::lock_guard lock(io_mutex_);
   if (!open_)
     return -SysError::eBADF;

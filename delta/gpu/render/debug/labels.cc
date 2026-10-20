@@ -4,7 +4,9 @@
 
 #include "gpu/render/debug/labels.h"
 
+#if !defined(DELTA_UWP)
 #include <dlfcn.h>
+#endif
 #include <cstdarg>
 #include <cstdio>
 
@@ -34,7 +36,11 @@ bool WantDebugUtils() {
       return kMarkers.get();
     if (trace::WantValidation())
       return true;
+#if defined(DELTA_UWP)
+    return false; // RenderDoc injection is unavailable in the packaged host.
+#else
     return dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD) != nullptr;
+#endif
   }();
   return kWant;
 }

@@ -20,6 +20,10 @@
 #include "base/strings/xstring.h"
 #include "gpu/gcn/gcn_disasm.h"
 #include "options/options.h"
+#if defined(DELTA_UWP)
+#include "guest/session.h"
+#include "io/path.h"
+#endif
 
 namespace {
 DELTA_OPTION(const char*, kShAudit, "DELTA_GPU_SHAUDIT", nullptr);
@@ -121,7 +125,14 @@ void MaybeWriteReportFile() {
 void ReportAtExit() {
   if (!AuditEnv())
     return;
+#if defined(DELTA_UWP)
+  if (auto* file = std::fopen(io::MakeAbsPath("shader-audit.log").c_str(), "w")) {
+    WriteAuditReport(file); std::fclose(file);
+    BASE_LOGI("shaudit", "Report saved to LocalFolder/shader-audit.log");
+  }
+#else
   WriteAuditReport(stderr);
+#endif
 }
 
 void WriteDumpFiles(const ShaderRecord& rec,
@@ -222,7 +233,11 @@ void AuditBegin(const char* stage, const u32* code, const Program& program) {
     return;
   if (!g_atexit_registered) {
     g_atexit_registered = true;
+#if defined(DELTA_UWP)
+    guest::RegisterSessionReset(ReportAtExit);
+#else
     std::atexit(ReportAtExit);
+#endif
   }
   g_active = Active{};
   g_active.on = true;

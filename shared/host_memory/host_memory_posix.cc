@@ -17,6 +17,10 @@
 #include "base/threading/lock_guard.h"
 #include "base/threading/mutex.h"
 #include "profile/profile.h"
+#if defined(DELTA_UWP)
+#include "embedding/host.h"
+#include "uwp/memory_win.h"
+#endif
 
 namespace host_memory {
 
@@ -137,7 +141,11 @@ static int ProtectionToPosix(PageProtection prot) {
     case PageProtection::kRwx:
       return PROT_READ | PROT_WRITE | PROT_EXEC;
     default:
+#if defined(DELTA_UWP)
+      embedding::Fail("Invalid guest page protection");
+#else
       __builtin_trap();
+#endif
       return 0;
   }
 }
@@ -350,6 +358,12 @@ void SetHostWriteHook(HostWriteHook hook) {
 void BeforeHostWrite(void* addr, size_t len) {
   if (const HostWriteHook hook = g_host_write_hook.load(); hook && len)
     hook(addr, len);
+#if defined(DELTA_UWP)
+  // Kernel/brokered I/O cannot service our user-mode demand faults while
+  // copying into a guest buffer. Commit and open every destination page first.
+  if (len && !uwp::PrepareWriteMemory(addr, len))
+    embedding::Fail(uwp::MemoryFaultError() ? uwp::MemoryFaultError() : "Unable to prepare guest I/O destination");
+#endif
 }
 
 }  // namespace host_memory

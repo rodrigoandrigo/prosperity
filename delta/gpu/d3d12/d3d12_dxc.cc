@@ -7,8 +7,10 @@
 #include "gpu/d3d12/d3d12_shader.h"
 
 #if defined(_WIN32)
-#include <dxcapi.h>
 #include <windows.h>
+#include <unknwn.h>
+#include <objidl.h>
+#include <dxcapi.h>
 #else
 #include <dlfcn.h>
 #include <dxc/dxcapi.h>
@@ -39,7 +41,11 @@ ThreadCompiler& Local() {
 
 DxcCreateInstanceProc LoadLibraryEntry() {
 #if defined(_WIN32)
+#if defined(DELTA_UWP)
+  HMODULE lib = LoadPackagedLibrary(L"dxcompiler.dll", 0);
+#else
   HMODULE lib = LoadLibraryW(L"dxcompiler.dll");
+#endif
   if (!lib)
     return nullptr;
   return reinterpret_cast<DxcCreateInstanceProc>(

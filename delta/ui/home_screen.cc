@@ -1,6 +1,9 @@
 #include "ui/home_screen.h"
+#if defined(DELTA_UWP)
+#include "platform.h"
+#endif
 
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 #include <SDL3/SDL.h>
 #include <stb_image.h>
 #include <sys/stat.h>
@@ -228,6 +231,11 @@ void SDLCALL DialogResult(void*, const char* const* files, int) {
     g_dialog_path = files[0];
 }
 
+#if defined(DELTA_UWP)
+void OpenGame(bool folder) { uwp::frontend::OpenPicker(folder); }
+bool DialogPending() { return uwp::frontend::PickerPending(); }
+void ReadDialogResult() { g_add_path = uwp::frontend::TakePickerPath(); }
+#else
 void OpenGame(bool folder) {
   {
     base::LockGuard<base::Mutex> lock(g_dialog_mutex);
@@ -262,6 +270,7 @@ void ReadDialogResult() {
   if (!path.empty())
     g_add_path = base::move(path);
 }
+#endif
 float DrawShortcut(ImDrawList* dl,
                    float x,
                    float y,
@@ -288,12 +297,16 @@ void DrawFirmwareWarning(ImDrawList* dl, float width, float margin) {
                           ? "PS4 and PS5 firmware modules are missing"
                           : (!g_ps4_ready ? "PS4 firmware modules are missing"
                                           : "PS5 firmware modules are missing");
+#if defined(DELTA_UWP)
+  const char* command = "LocalFolder/modules/ps4   |   LocalFolder/modules/ps5";
+#else
   const char* command =
       !g_ps4_ready && !g_ps5_ready
           ? "ps4delta --configure-ps4-fw <folder>   |   ps4delta "
             "--configure-ps5-fw <folders>"
           : (!g_ps4_ready ? "ps4delta --configure-ps4-fw <folder>"
                           : "ps4delta --configure-ps5-fw <folders>");
+#endif
   dl->AddText(ImVec2(tl.x + 80, tl.y + 18), overlay_theme::kText, title);
   dl->AddText(ImVec2(tl.x + 80, tl.y + 42), overlay_theme::kSecondary,
               "Install your decrypted firmware modules before playing.");
@@ -427,7 +440,7 @@ void HomeScreenBuild(u32 width, u32 height) {
   ImGui::Begin("Home", nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                    ImGuiWindowFlags_NoSavedSettings |
-                   ImGuiWindowFlags_NoBackground);
+                   ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoBringToFrontOnFocus);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const int first_vertex = dl->VtxBuffer.Size;
   ImGui::BeginDisabled(SettingsVisible() || g_launch_ns != 0 ||
@@ -729,6 +742,10 @@ void HomeScreenSetBackground(u32 style) {
                            ? style
                            : ChooseHomeBackground(base::RandomUint(0, 767));
   g_started_ns = base::TickClock::NowNs();
+}
+
+base::String HomeScreenSelectedPath() {
+  return g_games && g_selected < g_games->size() ? (*g_games)[g_selected].path : base::String{};
 }
 
 void BeginHomeScreen(const base::Vector<HomeGame>& games,

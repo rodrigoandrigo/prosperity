@@ -263,14 +263,10 @@ int PS4ABI sys_dynlib_get_list(u32* handles, size_t max_count, size_t* count) {
 // syscall 594. libkernel's _sceKernelLoadStartModule path calls this with
 // rdi=path, rsi=flags, rdx=&handle. It expects the loaded module's handle
 // written to *pHandle and 0 returned on success.
-int PS4ABI sys_dynlib_load_prx(const char* path,
-                               u64 flags,
-                               int* p_handle,
-                               u64 arg4,
-                               const void* opt,
-                               i64* p_res) {
-  if (p_res)
-    *p_res = 0;
+// This is the three-argument kernel syscall, not the six-argument
+// sceKernelLoadStartModule user API. The caller leaves r9 unspecified;
+// treating it as an output pointer corrupts memory (observed r9 == 3).
+int PS4ABI sys_dynlib_load_prx(const char* path, u64 flags, int* p_handle) {
   if (!path)
     return -SysError::eINVAL;
 
@@ -335,7 +331,7 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
                 alt.c_str());
   }
   if (!mod) {
-    mod = proc->LoadModule(base::StringRef(name));
+    mod = proc->LoadModule(base::StringRef(name), path);
     if (!mod) {
       LOG_ERROR("load_prx: unable to load {}", name.c_str());
       return -SysError::eNOENT;
@@ -354,9 +350,11 @@ int PS4ABI sys_dynlib_load_prx(const char* path,
   // libSceFontFt needs libSceFreeTypeFull (not shipped); libSceFreeTypeOt
   // exports the same 24 NIDs. The console binds PLT slots at first call, so
   // rebinding badcall slots is the same, just eager.
-  for (auto& other : proc->GetModuleList())
-    if (other.get() != mod.get() && other->HasUnresolvedImports())
-      other->ResolveImports();
+  for (auto& other : proc->GetModuleList()) {
+    if (other.get() == mod.get()) continue;
+    if (other->HasUnresolvedImports()) other->ResolveImports();
+    if (other->HasUnresolvedRelocations()) other->ApplyRelocations();
+  }
 
   // Run DT_INIT (module_start) at load-start, as the kernel does: system
   // modules self-register their service (video output client registers its display

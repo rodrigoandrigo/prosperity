@@ -1,3 +1,9 @@
+#if defined(DELTA_UWP)
+#include "uwp/signals_win.h"
+#endif
+#if defined(DELTA_UWP)
+#include "embedding/host.h"
+#endif
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -255,6 +261,9 @@ int PS4ABI sys_sigwait(const void* set, int* sig) {
 
 // BSD sigsuspend always returns EINTR once a handler would have run.
 int PS4ABI sys_sigsuspend(const void* sigmask) {
+#if defined(DELTA_UWP)
+  return uwp::SuspendForSignal(sigmask);
+#endif
   return -SysError::eINTR;
 }
 
@@ -354,6 +363,9 @@ int PS4ABI sys_abort2(const char* msg, int nargs, void** args) {
   (void)nargs;
   (void)args;
   BASE_LOGI("abort2", "{}", msg ? msg : "(null)");
+#if defined(DELTA_UWP)
+  embedding::Fail(msg ? msg : "Guest requested abort");
+#endif
   return 0;
 }
 
@@ -364,19 +376,30 @@ int PS4ABI sys_exit() {
 }
 
 int PS4ABI sys_rfork() {
+#if defined(DELTA_UWP)
+  return -static_cast<int>(SysError::eNOSYS);
+#else
   __builtin_trap();
   return 0;
+#endif
 }
 
 int PS4ABI sys_execve() {
+#if defined(DELTA_UWP)
+  return -static_cast<int>(SysError::eNOSYS);
+#else
   __builtin_trap();
   return 0;
+#endif
 }
 
 // We deliver no signals, so the mask is inert; still, a caller that saves the
 // old mask here to restore it later must not read uninitialised memory. The
 // FreeBSD sigset_t is 16 bytes (4x uint32). Report an empty old mask.
 int PS4ABI sys_sigprocmask(int how, const int* set, int* oset) {
+#if defined(DELTA_UWP)
+  return uwp::SignalMask(how,set,oset);
+#endif
   (void)how;
   (void)set;
   if (oset)
@@ -388,6 +411,9 @@ int PS4ABI sys_sigprocmask(int how, const int* set, int* oset) {
 // buffer uninitialised. struct sigaction on amd64 is 32 bytes (handler pointer
 // + flags + 16-byte sa_mask, padded).
 int PS4ABI sys_sigaction(int sig, const void* act, void* oact) {
+#if defined(DELTA_UWP)
+  return uwp::SignalAction(sig,act,oact);
+#endif
   (void)sig;
   (void)act;
   if (oact)

@@ -1,0 +1,9 @@
+# Library removal and module import
+
+On the UWP home screen, Library and modules provides Remove selected game and separate Import PS4 modules (RAR/ZIP) / Import PS5 modules (RAR/ZIP) buttons. Removing a game persists the revised recent-games index and removes its two cached images; it leaves the source game files in place. Library reads and writes are serialized. Artwork is rebuilt on the render owner with the existing bounded single atlas.
+
+Core initialization creates LocalFolder/modules/ps4 and LocalFolder/modules/ps5. Module pickers accept .rar and .zip, retain the brokered StorageFile, and send the registered path through the existing bounded mailbox. Archive decoding runs on a worker without accessing ImGui. The render owner polls completion and refreshes firmware readiness.
+
+The importer accepts .sprx, .prx, .elf and .dll files and places their basenames directly in the selected platform directory, removing packaging wrapper directories. It rejects duplicate basenames, traversal and absolute paths. Existing modules are copied to a staging folder and merged with decoded files; only after successful extraction is the directory swapped with MoveFileFromAppW. The prior directory is restored if publication fails. Import limits are 8192 files, 512 MiB per module and 4 GiB total; buffering uses 1 MiB, without artificial transfer throttling. Encrypted archives are unsupported. Interrupted .importing/.backup directories are preserved and reported for recovery.
+
+Release x64 1.0.0.16 builds and is signed with the project certificate. tools/test-uwp-frontend.ps1 tests real DLL ZIP and RAR extraction, byte equality, preservation, unsafe archive rejection, cancellation, removing all library entries and preserving source files, plus existing concurrency/device-loss/readback checks. Evidence is in build/uwp-library-modules-validation/validation.json and build/uwp-frontend-tests. Installed UWP pickers and Xbox were not exercised in this turn.

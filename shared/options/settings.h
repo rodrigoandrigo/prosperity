@@ -5,7 +5,11 @@
 namespace options {
 
 struct Settings {
+#if defined(DELTA_UWP)
+  base::String backend = "d3d12";
+#else
   base::String backend = "vulkan";
+#endif
   base::String gpu;
   base::String vsync;
   bool async_present = true;

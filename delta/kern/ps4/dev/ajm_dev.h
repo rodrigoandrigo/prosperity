@@ -13,6 +13,7 @@
 #include "kern/ps4/dev/device.h"
 
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 namespace kern {

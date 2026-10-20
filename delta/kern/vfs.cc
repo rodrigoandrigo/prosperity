@@ -520,7 +520,14 @@ bool ListDir(const char* path, base::Vector<DirEntry>& out) {
   while (dirent* e = readdir(d)) {
     if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0)
       continue;
+#if defined(DELTA_UWP)
+    struct stat info{};
+    const auto entry_path = JoinHost(host_dir, e->d_name);
+    const bool directory = stat(entry_path.c_str(), &info) == 0 && (info.st_mode & S_IFDIR) != 0;
+    out.push_back({e->d_name, directory});
+#else
     out.push_back({e->d_name, e->d_type == DT_DIR});
+#endif
   }
   closedir(d);
   return true;

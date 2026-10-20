@@ -8,6 +8,8 @@
 #include "host_memory/host_memory.h"
 #include "options/options.h"
 #include "profile/profile.h"
+#include "base/algorithm.h"
+#include "base/threading/lock_guard.h"
 
 #if defined(__linux__)
 #include <fcntl.h>

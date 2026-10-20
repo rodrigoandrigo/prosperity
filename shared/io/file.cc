@@ -8,6 +8,9 @@
  */
 
 #include "io/file.h"
+#if defined(DELTA_UWP)
+#include "io/storage.h"
+#endif
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -85,7 +88,7 @@ class PhysFile final : public FileBase {
   }
 
   u64 Write(const void* buf, size_t size) override {
-    const u64 written = std::fwrite(buf, size, 1, fptr_);
+    const u64 written = std::fwrite(buf, 1, size, fptr_);
     if (written)
       size_tracker_ = base::Max<u64>(size_tracker_, Tell());
     return written;
@@ -210,7 +213,14 @@ class MemStream final : public FileBase {
 }  // namespace
 
 File::File(const base::String& dir, FileMode mode, bool buffered)
-    : file_(base::MakeUnique<PhysFile>(dir, mode, buffered)) {}
+{
+#if defined(DELTA_UWP)
+  bool handled = false;
+  file_ = OpenStorage(dir.c_str(), mode, handled);
+  if (handled) return;
+#endif
+  file_ = base::MakeUnique<PhysFile>(dir, mode, buffered);
+}
 
 File::File(const void* ptr, size_t size)
     : file_(base::MakeUnique<MemStream>(ptr, size)) {}

@@ -42,7 +42,7 @@ const char* SyscallGetname(u32 idx);  // name_table.cc
 void DumpSyscallHist();
 
 // Classifies a raw handler return as an errno or a result; see the definition.
-extern "C" u32 SyscallErrno(u64 raw);
+extern "C" u32 PS4ABI SyscallErrno(u64 raw);
 
 // DELTA_SCHIST per-id call counter. The native trampoline increments it, so a
 // backend that emits no trampoline has to do so itself.
@@ -56,3 +56,4 @@ ModuleInfo* CalledIn(void* addr);
 }  // namespace kern
 
 extern "C" u64 g_sys_hist[1024];
+

@@ -1,12 +1,20 @@
 #include "ui/pause_menu.h"
+#if defined(DELTA_UWP)
+#include "platform.h"
+#else
+namespace uwp::frontend { inline void SetPaused(bool paused); }
+#endif
 
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 #include <SDL3/SDL.h>
 
 #include "base/algorithm.h"
 #include "base/atomic.h"
 #include "base/time/time.h"
 #include "guest/pause.h"
+#if !defined(DELTA_UWP)
+namespace uwp::frontend { inline void SetPaused(bool paused) { guest::SetPaused(paused); } }
+#endif
 #include "guest/session.h"
 #include "imgui.h"
 #include "ui/home_screen.h"
@@ -35,16 +43,23 @@ void BuildReturnTransition(u32 width, u32 height) {
 }
 
 void Resume() {
-  guest::SetPaused(false);
+  uwp::frontend::SetPaused(false);
   ImGui::GetIO().ConfigFlags = g_nav_flags;
   ImGui::GetIO().ClearInputKeys();
 }
 }  // namespace
 
 void PauseMenuSetGameTitle(const base::String& title) {
+#if defined(DELTA_UWP)
+  uwp::frontend::QueueTitle(title);
+#else
   g_title = title;
+#endif
 }
 
+#if defined(DELTA_UWP)
+void PauseMenuApplyTitle(const base::String& title) { g_title = title; }
+#endif
 void PauseMenuGameReady() {
   g_ready = true;
 }
@@ -60,12 +75,16 @@ void PauseMenuToggle() {
     g_selection = 0;
     g_nav_flags = ImGui::GetIO().ConfigFlags;
     ImGui::GetIO().ClearInputKeys();
-    guest::SetPaused(true);
+    uwp::frontend::SetPaused(true);
   }
 }
 
 bool PauseMenuVisible() {
+#if defined(DELTA_UWP)
+  return g_return_requested.load() || guest::Paused();
+#else
   return g_return_requested.load() || guest::Paused() || g_visibility > 0;
+#endif
 }
 
 void PauseMenuRequestExit() {
@@ -185,6 +204,7 @@ void PauseMenuBuild(u32 width, u32 height) {
     if (pad) {
       show(buttons);
     } else {
+#if !defined(DELTA_UWP)
       auto settings = GetMouseLookSettings();
       bool changed = ImGui::Checkbox("Mouse look", &settings.enabled);
       ImGui::SameLine();
@@ -205,6 +225,7 @@ void PauseMenuBuild(u32 width, u32 height) {
       ImGui::TextDisabled("Session only. Save defaults in home Settings.");
       ImGui::Spacing();
       ImGui::Separator();
+#endif
       show(keys);
     }
     ImGui::EndChild();
@@ -261,7 +282,7 @@ void PauseMenuBuild(u32 width, u32 height) {
 }
 
 void PauseMenuReset() {
-  guest::SetPaused(false);
+  uwp::frontend::SetPaused(false);
   g_ready = false;
   g_controls = false;
   g_exit_requested.store(false);

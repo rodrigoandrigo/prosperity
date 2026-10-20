@@ -1,6 +1,9 @@
 #include "ui/settings.h"
+#if defined(DELTA_UWP)
+#include "platform.h"
+#endif
 
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 #include <cmath>
 
 #include "base/algorithm.h"
@@ -61,6 +64,9 @@ bool Save() {
   g_restart = running != g_draft;
   if (g_saved.background != g_draft.background)
     HomeScreenSetBackground(g_draft.background);
+#if defined(DELTA_UWP)
+  uwp::frontend::SetPresentationMode(g_draft.vsync == "0");
+#endif
   g_saved = g_draft;
   g_error.clear();
   return true;
@@ -102,7 +108,13 @@ void ApiCards() {
   const char* names[] = {"Vulkan", "OpenGL", "Direct3D 12"};
   const char* values[] = {"vulkan", "opengl", "d3d12"};
   const char* descriptions[] = {"Default renderer", "OpenGL 4.6",
-                                "Via vkd3d on Linux"};
+
+#if defined(DELTA_UWP)
+                                "Native Direct3D 12"
+#else
+                                "Via vkd3d on Linux"
+#endif
+};
   for (int i = 0; i < 3; ++i) {
     if (i && !compact)
       ImGui::SameLine(0, 12);
@@ -199,16 +211,16 @@ void Graphics() {
     ImGui::EndCombo();
   }
   EndRow(y);
-  y = Row("Emulate display timing",
+  float y_timing = Row("Emulate display timing",
           "Keep PS4 and PS5 gameplay at the intended speed.");
   Toggle("display_timing", &g_draft.display_timing);
-  EndRow(y);
-  y = Row("Vertical sync", "Automatic balances pacing and latency.");
+  EndRow(y_timing);
+  float y_sync = Row("Vertical sync", "Automatic balances pacing and latency.");
   const char* modes[] = {"Automatic", "On", "Off"};
   int mode = g_draft.vsync == "1" ? 1 : (g_draft.vsync == "0" ? 2 : 0);
   if (ImGui::Combo("##vsync", &mode, modes, 3))
     g_draft.vsync = mode == 1 ? "1" : (mode == 2 ? "0" : "");
-  EndRow(y);
+  EndRow(y_sync);
   y = Row("Async presentation", "Keep the window responsive between frames.");
   Toggle("async", &g_draft.async_present);
   EndRow(y);
@@ -226,6 +238,7 @@ void Appearance() {
   if (ImGui::Combo("##background", &background, backgrounds, 4))
     g_draft.background = background;
   EndRow(y);
+#if !defined(DELTA_UWP)
   y = Row("Performance overlay", "Show frame rate and GPU timing during play.");
   Toggle("performance", &g_draft.performance);
   EndRow(y);
@@ -233,9 +246,13 @@ void Appearance() {
   ImGui::TextWrapped(
       "The background updates when saved. The performance "
       "overlay changes after restarting.");
+#endif
 }
 
 void Controls() {
+#if defined(DELTA_UWP)
+  ImGui::TextWrapped("Use the keyboard or an Xbox controller. Desktop mouse capture is unavailable in this host.");
+#else
   float y = Row("Mouse look", "Move the mouse to control the camera.");
   Toggle("mouse_look", &g_draft.mouse_look);
   EndRow(y);
@@ -258,9 +275,13 @@ void Controls() {
   ImGui::TextWrapped(
       "Saved controls apply immediately. Camera speed also "
       "depends on the game's controller settings.");
+#endif
 }
 
 void Advanced() {
+#if defined(DELTA_UWP)
+  ImGui::TextWrapped("Diagnostics are saved to prosperity.log in the app local folder. Vulkan validation is unavailable with Direct3D 12.");
+#else
   const float y =
       Row("Vulkan validation", "Extra diagnostics for graphics issues.");
   Toggle("validation", &g_draft.validation);
@@ -269,6 +290,7 @@ void Advanced() {
   ImGui::TextWrapped(
       "Validation can slow down rendering. Leave it off for "
       "normal play. Changes require a restart.");
+#endif
 }
 }  // namespace
 

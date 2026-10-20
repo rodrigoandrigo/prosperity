@@ -8,6 +8,11 @@
 #include "base/option_file.h"
 #include "base/strings/format.h"
 #include "guest/display.h"
+#if defined(DELTA_UWP)
+#include "io/path.h"
+#include "io/replace_win.h"
+#include <windows.h>
+#endif
 
 namespace options {
 namespace {
@@ -22,6 +27,9 @@ base::String Value(const char* name) {
 }  // namespace
 
 base::String SettingsPath() {
+#if defined(DELTA_UWP)
+  return io::MakeAbsPath(base::String("settings.txt"));
+#endif
   base::StringU8 value;
   if (base::GetEnvironmentVariable(u8"XDG_CONFIG_HOME", value) &&
       !value.empty() && value.front() == '/')
@@ -75,6 +83,14 @@ bool SaveSettings(const Settings& settings) {
       std::filesystem::path(path.c_str()).parent_path(), error);
   if (error)
     return false;
+#if defined(DELTA_UWP)
+  const auto text = base::Format(
+      "+DELTA_GPU_BACKEND=d3d12\n+DELTA_VK_GPU=\"{}\"\n"
+      "+DELTA_GPU_VSYNC=\"{}\"\n+DELTA_GPU_SYNCPRESENT={}\n"
+      "+DELTA_UI_BACKGROUND={}\n+DELTA_DISPLAY_TIMING={}\n",
+      settings.gpu, settings.vsync, !settings.async_present,
+      settings.background, settings.display_timing);
+#else
   const auto text = base::Format(
       "+DELTA_GPU_BACKEND={}\n+DELTA_VK_GPU=\"{}\"\n"
       "+DELTA_GPU_VSYNC=\"{}\"\n+DELTA_GPU_SYNCPRESENT={}\n"
@@ -86,6 +102,7 @@ bool SaveSettings(const Settings& settings) {
       settings.background, settings.performance, settings.validation,
       settings.mouse_look, settings.mouse_sensitivity, settings.mouse_invert_y,
       settings.display_timing);
+#endif
   const auto temporary = path + ".tmp";
   std::ofstream file(temporary.c_str(), std::ios::binary | std::ios::trunc);
   file.write(text.data(), text.size());
@@ -94,7 +111,15 @@ bool SaveSettings(const Settings& settings) {
     std::filesystem::remove(temporary.c_str(), error);
     return false;
   }
+#if defined(DELTA_UWP)
+  const auto source = std::filesystem::u8path(temporary.c_str()).wstring();
+  const auto destination = std::filesystem::u8path(path.c_str()).wstring();
+  if (io::ReplaceFromApp(source.c_str(), destination.c_str()))
+    return true;
+  error = std::error_code(GetLastError(), std::system_category());
+#else
   std::filesystem::rename(temporary.c_str(), path.c_str(), error);
+#endif
   if (!error)
     return true;
   std::filesystem::remove(temporary.c_str(), error);

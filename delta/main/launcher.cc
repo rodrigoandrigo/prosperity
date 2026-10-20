@@ -7,6 +7,9 @@
  */
 
 #include "main/launcher.h"
+#if defined(DELTA_UWP)
+#include "embedding/host.h"
+#endif
 
 #if defined(__GLIBC__)
 #include <malloc.h>
@@ -47,7 +50,7 @@
 #include "options/options.h"
 #include "patch/game_patches.h"
 #include "ui/pause_menu.h"
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 #include "main/home_screen.h"
 #include "main/recent_games.h"
 #endif
@@ -56,7 +59,7 @@ namespace {
 
 DELTA_OPTION(bool, kHdrFill, "DELTA_HDR_FILL", false);
 
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 constexpr bool kWantIcon = true;
 #else
 constexpr bool kWantIcon = false;
@@ -224,7 +227,7 @@ void SetWindowTitle(const BootTitle& title) {
   ui::PauseMenuSetGameTitle(title.name);
 }
 
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 base::Vector<u8> ReadTitleArtwork(const BootTitle& title,
                                   const base::String& path) {
   base::Vector<u8> png;
@@ -284,7 +287,7 @@ bool Launcher::Init() {
   return true;
 }
 
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
 base::String cli::AddHomeGame(const base::String& game_path) {
   base::String path = game_path;
   BootTitle title;
@@ -323,11 +326,16 @@ void Launcher::Boot(const base::String& game_path) {
   // Profiles must apply before platform settings and guest startup read
   // options.
   options::LoadGameProfile(title.title_id.c_str());
+#if defined(DELTA_UWP)
+  if (!gpu::render::Init(gpu::render::DefaultRenderer()))
+    embedding::Fail("Failed to initialize the graphics backend");
+#else
   gpu::render::Init(gpu::render::DefaultRenderer());
+#endif
   kern::ps4::SetTitleAttributes(title.is_ps5 ? 0 : title.attributes);
   gpu::ps4::SetPs4NeoMode(!title.is_ps5 && kern::ps4::IsNeoMode());
   SetWindowTitle(title);
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(DELTA_UWP)
   SetWindowArtwork(title, path);
 #endif
   proc_ = base::MakeUnique<kern::Process>();
@@ -340,13 +348,21 @@ void Launcher::Boot(const base::String& game_path) {
                           [this, main_module = base::move(title.main_module),
                            mounted = title.mounted] {
                             if (!proc_->Create(main_module, mounted)) {
+#if defined(DELTA_UWP)
+                              embedding::ReportFailure("Failed to create the guest process");
+#endif
                               guest::RequestStop();
                               return;
                             }
                             if (!guest::Stopping())
                               proc_->Start();
                           }))
+  {
+#if defined(DELTA_UWP)
+    embedding::ReportFailure("Failed to start the guest-main worker");
+#endif
     guest::RequestStop();
+  }
 }
 
 void Launcher::Stop() {

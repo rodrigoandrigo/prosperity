@@ -1,3 +1,6 @@
+#if defined(DELTA_UWP)
+#include "embedding/host.h"
+#endif
 
 /*
  * PS4Delta : PS4 emulation and research project
@@ -12,7 +15,7 @@
 // guest code runs through the FEXCore JIT instead (see delta/cpu/fex_backend).
 #if defined(DELTA_BACKEND_NATIVE)
 
-#include <xbyak.h>
+#include "cpu/code_generator.h"
 #include <cstdio>
 #include <cstring>
 #include "base/arch.h"
@@ -63,7 +66,11 @@ static Xbyak::Operand::Code CapstoneToXbyak(x86_reg reg) {
     CASE_N(14)
     CASE_N(15)
   }
+#if defined(DELTA_UWP)
+  embedding::Fail("Unsupported register in the guest instruction lifter");
+#else
   __builtin_trap();
+#endif
   return Xbyak::Operand::Code::RAX;
 #undef CASE_N
 #undef CASE_R
@@ -260,7 +267,7 @@ void CodeLift::EmitFsbase(u8* base) {
                        : Xbyak::Reg64(CapstoneToXbyak(operands[reg_idx].reg));
   const i32 imm = imm_store ? static_cast<i32>(operands[1].imm) : 0;
 
-  struct FsGen : Xbyak::CodeGenerator {
+  struct FsGen : cpu::CodeGenerator {
     FsGen(Xbyak::Reg64 reg,
           i32 disp,
           u8 size,
@@ -269,8 +276,13 @@ void CodeLift::EmitFsbase(u8* base) {
           i32 imm,
           i32 guest_fs_offset,
           i32 scratch_offset) {
+#if defined(_WIN32)
+      const auto& host_tls_segment = gs;
+#else
+      const auto& host_tls_segment = fs;
+#endif
       if (!is_write) {
-        putSeg(fs);
+        putSeg(host_tls_segment);
         mov(reg, ptr[guest_fs_offset]);
         if (size == 4)
           mov(reg.cvt32(), ptr[reg + disp]);
@@ -278,9 +290,9 @@ void CodeLift::EmitFsbase(u8* base) {
           mov(reg, ptr[reg + disp]);
       } else {
         auto tmp = reg.getIdx() == Xbyak::Operand::RAX ? rcx : rax;
-        putSeg(fs);
+        putSeg(host_tls_segment);
         mov(ptr[scratch_offset], tmp);
-        putSeg(fs);
+        putSeg(host_tls_segment);
         mov(tmp, ptr[guest_fs_offset]);
         if (imm_store && size == 4)
           mov(dword[tmp + disp], imm);
@@ -290,7 +302,7 @@ void CodeLift::EmitFsbase(u8* base) {
           mov(ptr[tmp + disp], reg.cvt32());
         else
           mov(ptr[tmp + disp], reg);
-        putSeg(fs);
+        putSeg(host_tls_segment);
         mov(tmp, ptr[scratch_offset]);
       }
     }

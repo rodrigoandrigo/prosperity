@@ -21,6 +21,7 @@ void BeginHomeScreen(const base::Vector<HomeGame>& games,
                      bool ps5_ready,
                      base::String (*check_game)(const base::String&) = nullptr);
 base::String TakeHomeScreenAddPath();
+base::String HomeScreenSelectedPath();
 void HomeScreenSetError(const base::String& error);
 bool HomeScreenDone();
 // Returns the selected game path, or an empty string when the window closes.

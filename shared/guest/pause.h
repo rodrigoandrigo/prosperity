@@ -11,6 +11,9 @@ void SetPaused(bool paused);
 void PollPause();
 void PausePoint();
 bool OnGuestThread();
+#if defined(_WIN32)
+bool HandleStopFault(void* context);
+#endif
 const i32* PauseFlagAddress();
 void RegisterCode(uintptr_t address, mem_size size);
 void SetThreadExitHandler(void (*exit)());

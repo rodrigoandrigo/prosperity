@@ -2,7 +2,10 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#if !defined(DELTA_UWP)
 #include <sys/ioctl.h>
+#endif
+#include <stdexcept>
 #include <unistd.h>
 #include <cerrno>
 #include <cstdio>
@@ -213,6 +216,9 @@ static bool TestBit(const u8* bits, u32 code) {
 }
 
 void HidSource::Scan() {
+#if defined(DELTA_UWP)
+  throw std::runtime_error("Linux evdev/uinput passthrough is unavailable in UWP; use the host controller bridge");
+#else
   if (scanned)
     return;
   scanned = true;
@@ -274,10 +280,15 @@ void HidSource::Scan() {
     }
     ::close(fd);
   }
+
+#endif
 }
 
 // Non-blocking drain of one device's pending events into its state.
 void HidSource::Drain(EvdevDevice& dev) {
+#if defined(DELTA_UWP)
+  throw std::runtime_error("Linux evdev/uinput passthrough is unavailable in UWP; use the host controller bridge");
+#else
   if (dev.fd < 0)
     return;
   InputEvent ev;
@@ -345,6 +356,8 @@ void HidSource::Drain(EvdevDevice& dev) {
       dev.dirty = true;
     }
   }
+
+#endif
 }
 
 i64 HidSource::NowUs() {
@@ -525,6 +538,9 @@ int FillController(HidSource& src, void* buffer, u32 count) {
 // ------------------------------------------------------------------- uinput
 
 void OpenUinput(HidSource& src) {
+#if defined(DELTA_UWP)
+  throw std::runtime_error("Linux evdev/uinput passthrough is unavailable in UWP; use the host controller bridge");
+#else
   if (src.uinput_fd >= 0)
     return;
   const int fd = ::open("/dev/uinput", O_WRONLY | O_NONBLOCK);
@@ -584,10 +600,15 @@ void OpenUinput(HidSource& src) {
 
 fail:
   ::close(fd);
+
+#endif
 }
 
 // Set rumble. `large`/`small` are the DS4 motor intensities (0..255).
 void SetRumble(HidSource& src, u8 large, u8 small) {
+#if defined(DELTA_UWP)
+  throw std::runtime_error("Linux evdev/uinput passthrough is unavailable in UWP; use the host controller bridge");
+#else
   if (src.uinput_fd < 0)
     return;
   if (large == 0 && small == 0 && src.ff_id >= 0) {
@@ -613,6 +634,8 @@ void SetRumble(HidSource& src, u8 large, u8 small) {
   ev.code = static_cast<u16>(src.ff_id);
   ev.value = 1;  // play
   ::write(src.uinput_fd, &ev, sizeof(ev));
+
+#endif
 }
 
 // ------------------------------------------------------------------ dispatch

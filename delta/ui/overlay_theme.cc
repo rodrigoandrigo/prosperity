@@ -99,8 +99,10 @@ void Apply(float scale) {
   colors[ImGuiCol_TabActive] = Color(kAccent, 0.18f);
   colors[ImGuiCol_TabUnfocused] = ImVec4(0, 0, 0, 0);
   colors[ImGuiCol_TabUnfocusedActive] = Color(kRaised);
+#ifdef IMGUI_HAS_DOCK
   colors[ImGuiCol_DockingPreview] = Color(kAccent, 0.35f);
   colors[ImGuiCol_DockingEmptyBg] = Color(kCanvas);
+#endif
   colors[ImGuiCol_PlotLines] = Color(kAccent);
   colors[ImGuiCol_PlotLinesHovered] = Color(kAccent);
   colors[ImGuiCol_PlotHistogram] = Color(kAccent);

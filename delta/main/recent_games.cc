@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <mutex>
 
 #include "base/environment_variables.h"
 #include "base/filesystem/file.h"
@@ -12,13 +13,22 @@
 #include "base/strings/format.h"
 #include "io/file.h"
 #include "logger/logger.h"
+#include "io/path.h"
+#include "io/replace_win.h"
+#if defined(DELTA_UWP)
+#include <filesystem>
+#endif
 
 namespace cli {
 namespace {
+std::mutex library_mutex;
 constexpr mem_size kMaxRecentGames = 12;
 constexpr u64 kMaxImageBytes = 16u << 20;
 
 base::String DataDirectory() {
+#if defined(DELTA_UWP)
+  return io::MakeAbsPath(base::String(""));
+#endif
   base::StringU8 value;
   if (base::GetEnvironmentVariable(u8"XDG_DATA_HOME", value) &&
       !value.empty() && value.front() == '/')
@@ -31,6 +41,11 @@ base::String DataDirectory() {
 }
 
 bool CreateDirectories(const base::String& path) {
+#if defined(DELTA_UWP)
+  std::error_code error;
+  std::filesystem::create_directories(std::filesystem::u8path(path.c_str()), error);
+  return !error;
+#else
   for (mem_size i = 1; i <= path.size(); ++i) {
     if (i != path.size() && path[i] != '/')
       continue;
@@ -38,6 +53,7 @@ bool CreateDirectories(const base::String& path) {
       return false;
   }
   return true;
+#endif
 }
 
 base::String Encode(const base::String& text) {
@@ -100,7 +116,12 @@ bool WriteBytes(const base::String& path, const void* bytes, mem_size size) {
     return false;
   }
   file.Close();
+#if defined(DELTA_UWP)
+  if (io::ReplaceFromApp(std::filesystem::u8path(temporary.c_str()).c_str(),
+                        std::filesystem::u8path(path.c_str()).c_str()))
+#else
   if (::rename(temporary.c_str(), path.c_str()) == 0)
+#endif
     return true;
   ::unlink(temporary.c_str());
   return false;
@@ -144,6 +165,7 @@ base::Vector<ui::HomeGame> ReadEntries(const base::String& directory) {
 }  // namespace
 
 base::Vector<ui::HomeGame> ReadRecentGames() {
+  std::lock_guard lock(library_mutex);
   const auto directory = DataDirectory();
   if (directory.empty())
     return {};
@@ -159,20 +181,43 @@ base::Vector<ui::HomeGame> ReadRecentGames() {
   return result;
 }
 
+bool ForgetGame(const base::String& path) {
+  std::lock_guard lock(library_mutex);
+  const auto directory = DataDirectory();
+  auto entries = ReadEntries(directory);
+  base::String index;
+  for (const auto& entry : entries) {
+    if (entry.path == path) continue;
+    base::FormatTo(index, "{}\t{}\t{}\t{}\n", Encode(entry.path),
+                   Encode(entry.name), Encode(entry.title_id), entry.is_ps5 ? 5 : 4);
+  }
+  if (!WriteBytes(directory + "/recent-games", index.data(), index.size())) return false;
+  ::unlink(ImagePath(directory, path, "icon").c_str());
+  ::unlink(ImagePath(directory, path, "art").c_str());
+  return true;
+}
+
 void RememberGame(const base::String& path,
                   const base::String& name,
                   const base::String& title_id,
                   bool is_ps5,
                   const base::Vector<u8>& icon,
                   const base::Vector<u8>& artwork) {
+  std::lock_guard lock(library_mutex);
   const auto directory = DataDirectory();
   if (directory.empty() || !CreateDirectories(directory + "/covers"))
     return;
+#if defined(DELTA_UWP)
+  std::error_code error;
+  auto absolute = std::filesystem::absolute(std::filesystem::u8path(path.c_str()), error).generic_u8string();
+  if (error) return;
+  const base::String canonical(reinterpret_cast<const char*>(absolute.c_str()));
+#else
   char absolute[PATH_MAX];
-  if (!::realpath(path.c_str(), absolute))
-    return;
-  auto entries = ReadEntries(directory);
+  if (!::realpath(path.c_str(), absolute)) return;
   const base::String canonical(absolute);
+#endif
+  auto entries = ReadEntries(directory);
   for (auto it = entries.begin(); it != entries.end();) {
     if (it->path == canonical)
       it = entries.erase(it, it + 1);

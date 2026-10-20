@@ -53,7 +53,7 @@ class Process {
   inline ModuleList& GetModuleList() { return modules_; }
   inline ObjectTable& GetObjTable() { return objects_; }
 
-  ModulePtr LoadModule(base::StringRef);
+  ModulePtr LoadModule(base::StringRef, const char* requested_path = nullptr);
   ModulePtr GetModule(base::StringRef);
   ModulePtr GetModule(u32);
 

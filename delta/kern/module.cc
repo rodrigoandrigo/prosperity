@@ -18,6 +18,9 @@
 #include "runtime/code_lift.h"
 #endif
 #include "cpu/backend.h"
+#if defined(DELTA_UWP)
+#include "uwp/thread_stack_win.h"
+#endif
 
 #include "formats/fself.h"
 
@@ -153,7 +156,9 @@ bool Module::FromMem(base::UniquePointer<u8[]> data) {
 
   if (!MapImage()) {
     LOG_ERROR("smodule: Failed to map image");
+#if !defined(DELTA_UWP)
     __builtin_trap();
+#endif
     return false;
   }
 
@@ -899,6 +904,10 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
           }
         }
       }
+#if defined(DELTA_UWP)
+      if (!std::strcmp(mod.name, "libkernel"))
+        ptr_out = uwp::WrapThreadAttributeQuery(nameenc, ptr_out);
+#endif
       return true;
     }
   }
@@ -988,11 +997,16 @@ bool Module::ResolveImports() {
 
 /*invoked by sys_dynlib_process_needed_and_relocate*/
 bool Module::ApplyRelocations() {
-  if (relocated_)
-    return true;
+  const bool retry = relocated_;
+  if (retry && unresolved_relocations_.empty()) return true;
   relocated_ = true;
-
-  for (size_t i = 0; i < num_rela_; i++) {
+  base::Vector<u32> pending;
+  pending.swap(unresolved_relocations_);
+  // Retry only unresolved entries. TLS/additive relocations already applied
+  // must never run a second time when a dynamic dependency becomes available.
+  const size_t count = retry ? pending.size() : num_rela_;
+  for (size_t index = 0; index < count; ++index) {
+    const u32 i = retry ? pending[index] : static_cast<u32>(index);
     auto* r = &rela_[i];
 
     u32 isym = ELF64_R_SYM(r->info);
@@ -1018,8 +1032,11 @@ bool Module::ApplyRelocations() {
         const char* name = &strtab_.ptr[sym->st_name];
 
         // unresolved import (missing dep): skip, leave the slot zeroed
-        if (!ResolveObfSymbol(name, sym_val) || !sym_val)
+        if (!ResolveObfSymbol(name, sym_val) || !sym_val) {
+          unresolved_relocations_.push_back(i);
           continue;
+        }
+        if (retry) BASE_LOGI("reloc", "late-bound data {} in {} at {:#x}", name, info_.name.c_str(), r->offset);
       }
     }
 

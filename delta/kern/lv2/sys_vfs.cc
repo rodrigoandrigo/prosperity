@@ -77,6 +77,8 @@
 #include "logger/logger.h"
 #include "options/options.h"
 
+#include "host_network.h"
+
 namespace {
 DELTA_OPTION(bool, kQuietGuest, "DELTA_QUIET_GUEST", false);
 DELTA_OPTION(bool, kManifestSeq, "DELTA_MANIFEST_SEQ", false);
@@ -1085,7 +1087,8 @@ int PS4ABI sys_select(int nfds,
   FD_ZERO(&host_read);
   FD_ZERO(&host_write);
   FD_ZERO(&host_except);
-  int host_max = -1, ready = 0;
+  intptr_t host_max = -1;
+  int ready = 0;
   // The always-ready fds, collected before the wait: with one of them in the
   // set there is nothing to wait for.
   u64 always_read[kFdSetWords] = {}, always_write[kFdSetWords] = {};
@@ -1107,7 +1110,7 @@ int PS4ABI sys_select(int nfds,
       }
       continue;
     }
-    const int h = s->HostFd();
+    const auto h = s->HostFd();
     if (r)
       FD_SET(h, &host_read);
     if (w)
@@ -1125,20 +1128,20 @@ int PS4ABI sys_select(int nfds,
     if (gt->sec > 0 || gt->usec >= 50 * 1000)
       tv = {0, 50 * 1000};
     else
-      tv = {0, static_cast<suseconds_t>(gt->usec)};
+      tv = {0, static_cast<decltype(tv.tv_usec)>(gt->usec)};
   }
   if (ready)
     tv = {0, 0};
 
   if (host_max >= 0) {
     const int n =
-        ::select(host_max + 1, &host_read, &host_write, &host_except, &tv);
+        host_network::Select(host_max + 1, &host_read, &host_write, &host_except, &tv);
     if (n > 0) {
       for (int fd = 0; fd < nfds; fd++) {
         auto s = FdToSocket(static_cast<u32>(fd));
         if (!s)
           continue;
-        const int h = s->HostFd();
+        const auto h = s->HostFd();
         if (FdIsSet(readfds, fd) && FD_ISSET(h, &host_read)) {
           FdSet(always_read, fd);
           ready++;

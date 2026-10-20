@@ -1,3 +1,6 @@
+#if defined(DELTA_UWP)
+#include "uwp/signals_win.h"
+#endif
 /*
  * PS4Delta : PS4 emulation and research project
  *
@@ -544,7 +547,9 @@ static void CvTrace(const char* what, const void* ucond, u32 self) {
   char comm[32] = "";
   ThreadComm(comm, sizeof(comm));
   BASE_LOGI("cv", "{:<12} ucond={:p} tid={} ({})", what, ucond, self, comm);
+  #if !defined(DELTA_UWP)
   std::fflush(stderr);
+#endif
 }
 
 // DELTA_UMTX_ADDRWATCH: one line per umtx op touching the watched window.
@@ -577,7 +582,9 @@ static void AddrWatchLog(int op,
             ptr, a, static_cast<unsigned long long>(val), self,
             hit_ptr ? " HIT:ptr" : "", hit_a ? " HIT:a" : "",
             hit_batch ? " HIT:nwake-batch" : "", comm);
+  #if !defined(DELTA_UWP)
   std::fflush(stderr);
+#endif
 }
 
 // Raw guest bytes around a watched word (16 before + 32 at) to check struct
@@ -593,7 +600,9 @@ static void AddrWatchDump(const char* what, const void* p, u32 self) {
   HexBytes(at, sizeof(at), p, 32);
   BASE_LOGI("umtxw", "{:<16} {:p} tid={}\n  [-16] {}\n  [ +0] {}", what, p,
             self, pre, at);
+  #if !defined(DELTA_UWP)
   std::fflush(stderr);
+#endif
 }
 
 // DELTA_UMTX_HIST: sys_umtx_op is a dozen primitives behind one syscall number,
@@ -731,7 +740,9 @@ void Dump() {
     BASE_LOGI("umtxhist", "  {:<18} {:#012x} gtid={:<3} {}", OpName(rows[i].op),
               (unsigned long long)rows[i].addr, rows[i].tid,
               (unsigned long long)rows[i].n);
+  #if !defined(DELTA_UWP)
   std::fflush(stderr);
+#endif
 }
 
 // Started from the first counted call, not static init: options are read long
@@ -884,7 +895,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       auto& ch = bk.chan[ptr];
       SimpleWaiter waiter;
       ch.QueueSimple(waiter);
-      while (!guest::Stopping() && !changed() && !waiter.selected) {
+      while (!guest::Stopping() &&
+#if defined(DELTA_UWP)
+             !uwp::HasPendingSignal() &&
+#endif
+             !changed() && !waiter.selected) {
         if (dl && base::TimeTicks::Now() >= *dl) {
           ch.RemoveSimple(waiter);
           return -SysError::eTIMEDOUT;
@@ -932,7 +947,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       // mutex doesn't degrade into a 2ms spin per waiter (a spurious exit is
       // harmless, libthr re-runs its CAS loop).
       StallReport stall{"MUTEX_WAIT", ptr};
-      while (!guest::Stopping() && (p->load() & ~UMUTEX_CONTESTED) != 0 &&
+      while (!guest::Stopping() &&
+#if defined(DELTA_UWP)
+             !uwp::HasPendingSignal() &&
+#endif
+             (p->load() & ~UMUTEX_CONTESTED) != 0 &&
              ch.gen == g0) {
         bk.cv.WaitFor(lk, UmtxTimeout());
         stall.Tick();
@@ -1009,7 +1028,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       } dequeue{&ch, &queued};
       StallReport stall{"MUTEX_LOCK", ptr};
       for (;;) {
-        if (guest::Stopping())
+        if (guest::Stopping()
+#if defined(DELTA_UWP)
+            || uwp::HasPendingSignal()
+#endif
+        )
           return -static_cast<int>(SysError::eINTR);
         stall.Tick();
         u32 owner = p->load();
@@ -1123,8 +1146,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       int r = 0;
       StallReport stall{"CV_WAIT", ptr, a};
       for (;;) {
-        if (guest::Stopping())
-          return -static_cast<int>(SysError::eINTR);
+        if (guest::Stopping()
+#if defined(DELTA_UWP)
+            || uwp::HasPendingSignal()
+#endif
+        ) { r = -static_cast<int>(SysError::eINTR); break; }
         stall.Tick();
         if (ch.gen != g0)  // broadcast: releases every sleeper
           break;
@@ -1197,7 +1223,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
           reinterpret_cast<volatile u32*>(static_cast<u8*>(ptr))[1];
       base::UniqueLock<base::Mutex> lk(bk.m);
       for (;;) {
-        if (guest::Stopping())
+        if (guest::Stopping()
+#if defined(DELTA_UWP)
+            || uwp::HasPendingSignal()
+#endif
+        )
           return -static_cast<int>(SysError::eINTR);
         u32 st = p->load();
         if (wr) {
@@ -1242,7 +1272,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       base::UniqueLock<base::Mutex> lk(bk.m);
       u32 st = p->load();
       for (;;) {
-        if (guest::Stopping())
+        if (guest::Stopping()
+#if defined(DELTA_UWP)
+            || uwp::HasPendingSignal()
+#endif
+        )
           return -static_cast<int>(SysError::eINTR);
         u32 next;
         if (st & kWriteOwner)
@@ -1275,7 +1309,11 @@ int PS4ABI sys_umtx_op(void* ptr, int op, u64 val, void* a, void* b) {
       has_waiters->compare_exchange_strong(z, 1);  // publish "has waiters"
       auto& ch = bk.chan[ptr];
       const u64 g0 = ch.gen;
-      while (!guest::Stopping() && *count == 0 && ch.gen == g0) {
+      while (!guest::Stopping() &&
+#if defined(DELTA_UWP)
+             !uwp::HasPendingSignal() &&
+#endif
+             *count == 0 && ch.gen == g0) {
         if (dl && base::TimeTicks::Now() >= *dl)
           return -SysError::eTIMEDOUT;
         bk.cv.WaitFor(lk, UmtxTimeout());
@@ -1381,6 +1419,9 @@ int PS4ABI sys_thr_exit(i64* state) {
 
 // No guest signal machinery, so inter-thread kills are accepted and logged.
 int PS4ABI sys_thr_kill(u32 tid, int sig) {
+#if defined(DELTA_UWP)
+  return uwp::SendThreadSignal(tid,sig);
+#endif
   BASE_LOGI("thr_kill", "tid={} sig={} (ignored)", tid, sig);
   return 0;
 }
