@@ -32,6 +32,20 @@ DirectXPage::DirectXPage():
 	StartupLog::Write(L"DirectXPage InitializeComponent");
     InitializeComponent();
     StartupLog::Write(L"DirectXPage XAML loaded");
+    m_xbox = Windows::System::Profile::AnalyticsInfo::VersionInfo->DeviceFamily == "Windows.Xbox";
+    if(m_xbox) {
+        try { InitializePointerPages(); }
+        catch (Platform::Exception^ error) {
+            m_pointerFailed = true;
+            StartupLog::Error(L"Xbox pointer pages unavailable; continuing startup", error);
+        }
+        StartupLog::Write(L"Register Xbox BackRequested handler");
+        try {
+            m_backToken = SystemNavigationManager::GetForCurrentView()->BackRequested +=
+                ref new EventHandler<BackRequestedEventArgs^>([](Object^, BackRequestedEventArgs^ args) { args->Handled = true; });
+            m_backRegistered = true;
+        } catch (Platform::Exception^ error) { StartupLog::Error(L"Xbox BackRequested unavailable; continuing startup", error); }
+    }
 
 	// Registre manipuladores de eventos para o ciclo de vida da página.
 	CoreWindow^ window = Window::Current->CoreWindow;
@@ -72,6 +86,7 @@ DirectXPage::DirectXPage():
     m_statusTimer->Tick += ref new EventHandler<Object^>([weakThis](Object^, Object^) {
         auto page = weakThis.Resolve<DirectXPage>();
         if (page && page->m_main) {
+            page->UpdateSystemPointer();
             page->coreStatus->Text = page->m_main->Host().Status();
             page->coreStatus->Visibility = page->m_main->Host().FrontendAvailable() ? Windows::UI::Xaml::Visibility::Collapsed : Windows::UI::Xaml::Visibility::Visible;
             const auto actions = page->m_main->Host().TakeActions();
@@ -117,7 +132,9 @@ DirectXPage::DirectXPage():
     });
     window->KeyDown += ref new TypedEventHandler<CoreWindow^, KeyEventArgs^>([weakPage](CoreWindow^, KeyEventArgs^ args) {
         auto page = weakPage.Resolve<DirectXPage>(); if (!page || !page->m_main) return;
-        prosperity_input e{}; e.type = 4; e.code = static_cast<uint32_t>(args->VirtualKey);
+        const auto key=static_cast<uint32_t>(args->VirtualKey);
+        if(page->m_xbox && (key==27 || (key>=195 && key<=218))) { args->Handled=true; return; }
+        prosperity_input e{}; e.type = 4; e.code = key;
         if (e.code == 16) e.code = args->KeyStatus.ScanCode == 0x36 ? 161 : 160;
         if (e.code == 17) e.code = args->KeyStatus.IsExtendedKey ? 163 : 162;
         if (e.code == 18) e.code = args->KeyStatus.IsExtendedKey ? 165 : 164; e.x = 1;
@@ -125,7 +142,9 @@ DirectXPage::DirectXPage():
     });
     window->KeyUp += ref new TypedEventHandler<CoreWindow^, KeyEventArgs^>([weakPage](CoreWindow^, KeyEventArgs^ args) {
         auto page = weakPage.Resolve<DirectXPage>(); if (!page || !page->m_main) return;
-        prosperity_input e{}; e.type = 4; e.code = static_cast<uint32_t>(args->VirtualKey);
+        const auto key=static_cast<uint32_t>(args->VirtualKey);
+        if(page->m_xbox && (key==27 || (key>=195 && key<=218))) { args->Handled=true; return; }
+        prosperity_input e{}; e.type = 4; e.code = key;
         if (e.code == 16) e.code = args->KeyStatus.ScanCode == 0x36 ? 161 : 160;
         if (e.code == 17) e.code = args->KeyStatus.IsExtendedKey ? 163 : 162;
         if (e.code == 18) e.code = args->KeyStatus.IsExtendedKey ? 165 : 164;
@@ -158,6 +177,10 @@ DirectXPage::DirectXPage():
 
 DirectXPage::~DirectXPage()
 {
+    if(m_backRegistered) {
+        try { SystemNavigationManager::GetForCurrentView()->BackRequested -= m_backToken; }
+        catch (Platform::Exception^ error) { StartupLog::Error(L"Unregister Xbox BackRequested", error); }
+    }
     if (m_statusTimer) m_statusTimer->Stop();
 	// Interrompa a renderização e o processamento de eventos em destruição.
 	m_main->StopRenderLoop();
@@ -247,6 +270,89 @@ void DirectXPage::OnSwapChainPanelSizeChanged(Object^ sender, SizeChangedEventAr
 }
 
 
+
+void DirectXPage::InitializePointerPages() {
+    // Windows evaluates RequiresPointer when a Page gains focus. Keep two
+    // distinct pages and transfer the existing surface; retain the swapchain.
+    StartupLog::Write(L"Create Xbox menu and gameplay pointer pages");
+    auto menu = ref new Page();
+    menu->RequiresPointer = Windows::UI::Xaml::Controls::RequiresPointer::WhenFocused;
+    auto game = ref new Page();
+    game->RequiresPointer = Windows::UI::Xaml::Controls::RequiresPointer::Never;
+    menu->IsTabStop = true;
+    game->IsTabStop = true;
+    auto focus = ref new RoutedEventHandler([](Object^ sender, RoutedEventArgs^) {
+        try {
+            if (!safe_cast<Page^>(sender)->Focus(Windows::UI::Xaml::FocusState::Programmatic))
+                StartupLog::Write(L"Xbox pointer page focus pending");
+        } catch (Platform::Exception^ error) { StartupLog::Error(L"Xbox pointer page focus unavailable", error); }
+    });
+    menu->Loaded += focus;
+    game->Loaded += focus;
+    auto frame = ref new Windows::UI::Xaml::Controls::Frame();
+    RequiresPointer = Windows::UI::Xaml::Controls::RequiresPointer::Never;
+    auto surface = Content;
+    Content = nullptr;
+    try {
+        menu->Content = surface;
+        frame->Content = menu;
+        Content = frame;
+    } catch (...) {
+        menu->Content = nullptr;
+        Content = surface;
+        throw;
+    }
+    m_menuPointerPage = menu;
+    m_gamePointerPage = game;
+    m_pointerFrame = frame;
+    m_pointerSurface = surface;
+    StartupLog::Write(L"Xbox pointer pages ready");
+}
+
+void DirectXPage::UpdateSystemPointer() {
+    if(!m_xbox || !m_main || m_pointerFailed || !m_pointerFrame) return;
+    const bool hidden = m_main->Host().HideSystemPointer();
+    if(hidden == m_pointerHidden) return;
+    SwitchPointerPage(hidden);
+}
+
+void DirectXPage::SwitchPointerPage(bool hidden) {
+    auto previous = m_pointerHidden ? m_gamePointerPage : m_menuPointerPage;
+    auto next = hidden ? m_gamePointerPage : m_menuPointerPage;
+    try {
+        previous->Content = nullptr;
+        next->Content = m_pointerSurface;
+        m_pointerFrame->Content = next;
+        m_pointerHidden = hidden;
+        next->Focus(Windows::UI::Xaml::FocusState::Programmatic);
+        StartupLog::Write(hidden ? L"Xbox system pointer disabled for gameplay" : L"Xbox system pointer restored for frontend");
+    } catch (Platform::Exception^ error) {
+        m_pointerFailed = true;
+        StartupLog::Error(L"Xbox pointer transition unavailable; preserving renderer", error);
+        try {
+            next->Content = nullptr;
+            previous->Content = m_pointerSurface;
+            m_pointerFrame->Content = previous;
+        } catch (Platform::Exception^ restoreError) { StartupLog::Error(L"Restore Xbox pointer surface", restoreError); }
+    }
+}
+
+void DirectXPage::ValidatePointerPages() {
+    // Explicit diagnostic activation also exercises page reparenting on PC.
+    // This does not claim to emulate the console's OS cursor behavior.
+    try {
+        if(!m_pointerFrame) InitializePointerPages();
+        auto panel = swapChainPanel;
+        for(int i=0;i<4;++i) {
+            SwitchPointerPage((i % 2) == 0);
+            UpdateLayout();
+            if(m_pointerFailed || swapChainPanel != panel ||
+               m_pointerFrame->Content != (m_pointerHidden ? m_gamePointerPage : m_menuPointerPage))
+                throw ref new FailureException(L"Pointer page round trip failed");
+        }
+        StartupLog::Write(L"PASS pointer page round trips; SwapChainPanel retained");
+    } catch(Platform::Exception^ error) { StartupLog::Error(L"FAIL pointer page validation",error); }
+}
 
 void DirectXPage::OpenPicker(bool folder, bool modules)
 {

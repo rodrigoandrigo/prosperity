@@ -37,6 +37,13 @@ App::App()
     StartupLog::Write(L"App InitializeComponent");
     InitializeComponent();
     StartupLog::Write(L"App initialized");
+    if (Windows::System::Profile::AnalyticsInfo::VersionInfo->DeviceFamily == "Windows.Xbox") {
+        // Configure once, before creating any window content. Changing the
+        // application policy later is not a gameplay cursor toggle.
+        StartupLog::Write(L"Configure Xbox application pointer policy");
+        try { RequiresPointerMode = ApplicationRequiresPointerMode::WhenRequested; }
+        catch (Platform::Exception^ error) { StartupLog::Error(L"Xbox application pointer policy unavailable", error); }
+    }
 	Suspending += ref new SuspendingEventHandler(this, &App::OnSuspending);
 	Resuming += ref new EventHandler<Object^>(this, &App::OnResuming);
 }
@@ -110,6 +117,7 @@ void App::OnLaunched(Windows::ApplicationModel::Activation::LaunchActivatedEvent
     }
     // Verifique se a janela atual está ativa
 	Window::Current->Activate();
+    if(m_directXPage && arguments == L"--validate-pointer-pages") m_directXPage->ValidatePointerPages();
     StartupLog::Write(L"Window activated");
 }
 /// <summary>

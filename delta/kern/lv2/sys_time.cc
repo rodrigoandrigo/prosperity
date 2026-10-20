@@ -20,6 +20,9 @@
 #include "kern/lv2/error_table.h"
 #include "kern/lv2/sys_time.h"
 #include "options/options.h"
+#if defined(DELTA_UWP)
+#include "uwp/memory_win.h"
+#endif
 
 namespace {
 DELTA_OPTION(long, kTimeScale, "DELTA_TIMESCALE", 1);
@@ -269,16 +272,35 @@ int PS4ABI sys_set_timezone_info(void* info) {
 // (zero offset, no DST), so the conversion is the identity: copy the input
 // time_t straight to the output if one was supplied. This keeps timestamps
 // self-consistent rather than introducing a spurious offset.
-int PS4ABI sys_utc_to_localtime(i64 utc, void* out, void* tzinfo, void* dst) {
-  if (out)
-    *reinterpret_cast<i64*>(out) = utc;
-  return 0;
+namespace {
+template <typename T>
+bool StoreConversion(T* destination, const T& value) {
+  if (!destination) return true;
+#if defined(DELTA_UWP)
+  return uwp::WriteMemory(destination, &value, sizeof(value));
+#else
+  std::memcpy(destination, &value, sizeof(value));
+  return true;
+#endif
+}
+int ConvertUtcPolicy(i64 time, i64* out, sce_time_conversion* info, i32* dst) {
+  const sce_time_conversion conversion{time, 0, 0};
+  const i32 dst_seconds = 0;
+  return StoreConversion(out, time) && StoreConversion(info, conversion) &&
+                 StoreConversion(dst, dst_seconds)
+             ? 0 : -static_cast<int>(SysError::eFAULT);
+}
+}  // namespace
+int PS4ABI sys_utc_to_localtime(i64 utc, i64* out,
+                               sce_time_conversion* info, i32* dst) {
+  return ConvertUtcPolicy(utc, out, info, dst);
 }
 
-int PS4ABI
-sys_localtime_to_utc(i64 local, void* out, void* a, void* b, void* c) {
-  if (out)
-    *reinterpret_cast<i64*>(out) = local;
-  return 0;
+int PS4ABI sys_localtime_to_utc(i64 local, i64 dst_selector, i64* out,
+                               sce_time_conversion* info, i32* dst) {
+  // Syscall 639: rsi is a scalar DST selector (commonly 1), not an output
+  // address. libkernel's wrapper uses rdx/rcx/r8 for its three outputs.
+  (void)dst_selector;
+  return ConvertUtcPolicy(local, out, info, dst);
 }
 }  // namespace kern

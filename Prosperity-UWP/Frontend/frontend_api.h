@@ -21,6 +21,7 @@ prosperity_frontend_path(prosperity_frontend*, const char*);
 /* Sole render owner, serialized with resize/device loss. COM interfaces only;
  * no C++ or ImGui objects cross this ABI. Returns picker/exit actions: 1/2/4.
  * Bits 32/64 request the PS4/PS5 module archive picker.
+ * Bit 128 disables the system pointer during gameplay (level, not queued).
  * Bit 8 asks the host for immediate presentation (vsync off). */
 PROSPERITY_API uint32_t PROSPERITY_CALL
 prosperity_frontend_render(prosperity_frontend*,

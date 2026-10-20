@@ -25,6 +25,7 @@ class ProsperityHost {
   Platform::String^ RegisterStorage(Windows::Storage::IStorageItem^ item, Platform::String^ token);
   uint32_t TakeActions() { return m_actions.exchange(0); }
   bool FrontendAvailable() const { return m_frontend != nullptr && !m_frontendFailed.load(); }
+  bool HideSystemPointer() const { return m_hidePointer.load(); }
   bool ImmediatePresentation() const { return m_immediate.load(); }
  private:
   struct Frame {
@@ -48,6 +49,7 @@ class ProsperityHost {
   decltype(&prosperity_frontend_path) m_frontendPath = nullptr;
   std::atomic<uint32_t> m_actions{0};
   std::atomic<bool> m_immediate{false};
+  std::atomic<bool> m_hidePointer{false};
   decltype(&prosperity_mount_storage) m_mountStorage = nullptr;
   decltype(&prosperity_set_gamepad) m_setGamepad = nullptr;
   decltype(&prosperity_get_vibration) m_getVibration = nullptr;

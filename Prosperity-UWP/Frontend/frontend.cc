@@ -404,20 +404,21 @@ void Pad(prosperity_frontend& f) {
     if (down)
       f.pad = true;
   };
-  // The home and pause screens intentionally use the desktop shortcut keys.
-  add(ImGuiKey_GamepadFaceDown, p.cross);
+  // The system owns the Xbox left stick cursor. Never translate that stick
+  // into UI selection. A/B have no home-screen launch/exit shortcuts.
+  add(ImGuiKey_GamepadFaceDown, !f.home && p.cross);
   add(ImGuiKey_GamepadFaceRight, p.circle);
   add(ImGuiKey_GamepadDpadLeft, p.left);
   add(ImGuiKey_GamepadDpadRight, p.right);
   add(ImGuiKey_GamepadDpadUp, p.up);
   add(ImGuiKey_GamepadDpadDown, p.down);
   if (f.pad) {
-    add(ImGuiKey_LeftArrow, p.left || p.lx < 70);
-    add(ImGuiKey_RightArrow, p.right || p.lx > 186);
-    add(ImGuiKey_UpArrow, p.up || p.ly < 70);
-    add(ImGuiKey_DownArrow, p.down || p.ly > 186);
-    add(ImGuiKey_Enter, p.cross);
-    add(ImGuiKey_Escape, p.circle);
+    add(ImGuiKey_LeftArrow, p.left);
+    add(ImGuiKey_RightArrow, p.right);
+    add(ImGuiKey_UpArrow, p.up);
+    add(ImGuiKey_DownArrow, p.down);
+    add(ImGuiKey_Enter, !f.home && p.cross);
+    add(ImGuiKey_Escape, !f.home && p.circle);
     add(ImGuiKey_O, p.triangle);
     add(ImGuiKey_S, p.options && !p.touchpad);
   }
@@ -750,7 +751,8 @@ uint32_t PROSPERITY_CALL prosperity_frontend_render(prosperity_frontend* f,
     }
     uwp::SetFrontendInput(blocked, keys);
     const auto result =
-        std::exchange(f->actions, 0u) | (f->immediate ? 8u : 0u);
+        std::exchange(f->actions, 0u) | (f->immediate ? 8u : 0u) |
+        ((f->home || ui::PauseMenuVisible()) ? 0u : 128u);
     owner = nullptr;
     return result;
   } catch (const std::exception& error) {

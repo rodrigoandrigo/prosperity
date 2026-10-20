@@ -224,6 +224,7 @@ void ProsperityHost::RenderFrontend(ID3D11Device* device, ID3D11DeviceContext* c
     m_frontendFailed = true;
   }
   m_immediate = (actions & 8) != 0;
+  m_hidePointer = (actions & 128) != 0;
   m_actions.fetch_or(actions & (7 | 32 | 64));
 }
 }

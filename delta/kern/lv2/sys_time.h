@@ -69,7 +69,14 @@ int PS4ABI sys_ffclock_getestimate(void* cest);
 int PS4ABI sys_ntp_gettime(void* ntv);
 
 int PS4ABI sys_set_timezone_info(void* info);
-int PS4ABI sys_utc_to_localtime(i64 utc, void* out, void* tzinfo, void* dst);
-int PS4ABI
-sys_localtime_to_utc(i64 local, void* out, void* a, void* b, void* c);
+struct sce_time_conversion {
+  i64 time;
+  i32 utc_offset_seconds;
+  i32 dst_offset_seconds;
+};
+static_assert(sizeof(sce_time_conversion) == 16);
+int PS4ABI sys_utc_to_localtime(i64 utc, i64* out,
+                               sce_time_conversion* info, i32* dst);
+int PS4ABI sys_localtime_to_utc(i64 local, i64 dst_selector, i64* out,
+                               sce_time_conversion* info, i32* dst);
 }  // namespace kern

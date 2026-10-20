@@ -117,6 +117,14 @@ void Symbolize(uintptr_t address, char* out, size_t size) {
       }
     }
   }
+  MEMORY_BASIC_INFORMATION region{};
+  if (VirtualQuery(reinterpret_cast<void*>(address), &region, sizeof(region)) && region.Type == MEM_IMAGE) {
+    const auto image = reinterpret_cast<uintptr_t>(region.AllocationBase);
+    std::snprintf(out, size, "host-image[%#llx]+%#llx",
+                  static_cast<unsigned long long>(image),
+                  static_cast<unsigned long long>(address - image));
+    return;
+  }
   std::snprintf(out, size, "%#llx (host/unmapped)", static_cast<unsigned long long>(address));
 }
 void Backtrace(uintptr_t frame) {

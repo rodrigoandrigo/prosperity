@@ -588,7 +588,12 @@ void HomeScreenBuild(u32 width, u32 height) {
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
   }
+#if defined(DELTA_UWP)
+  // UWP no longer maps A/B to the home screen Play/Exit shortcuts.
+  const bool pad = false;
+#else
   const bool pad = UsingGamepad();
+#endif
   float hint_x = margin;
   hint_x = DrawShortcut(dl, hint_x, h - 40, pad ? "D-pad" : "< >", "Browse");
   hint_x = DrawShortcut(

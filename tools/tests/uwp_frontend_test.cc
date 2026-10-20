@@ -10,8 +10,10 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include "../../Prosperity-UWP/Frontend/frontend_api.h"
+#include "../../delta/uwp/gamepad_api.h"
 using Microsoft::WRL::ComPtr;
 void Check(bool ok, const char* text) {
   if (!ok)
@@ -73,6 +75,8 @@ int wmain(int argc, wchar_t** argv) {
 #define API(name)                                                              \
   auto name = reinterpret_cast<decltype(&::name)>(GetProcAddress(dll, #name)); \
   Check(name != nullptr, #name)
+    API(prosperity_set_gamepad);
+    API(prosperity_get_state);
     API(prosperity_create);
     API(prosperity_destroy);
     API(prosperity_wait);
@@ -168,6 +172,19 @@ int wmain(int argc, wchar_t** argv) {
         }
     };
     settle();
+    Check((render()&128)==0,"system pointer requested in library");
+    prosperity_gamepad_state pad{}; pad.size=sizeof(pad); pad.connected=1;
+    for(auto buttons : {uint32_t(4), uint32_t(8)}) {
+      pad.buttons=buttons; Check(prosperity_set_gamepad(core,&pad)==PROSPERITY_OK,"publish gamepad");
+      for(int i=0;i<3;++i) Check((render()&4)==0,"B cannot exit home");
+      Check(prosperity_get_state(core)==PROSPERITY_READY,"A cannot start title from home");
+      pad.buttons=0; prosperity_set_gamepad(core,&pad); render();
+    }
+    pad.left_x=1; prosperity_set_gamepad(core,&pad);
+    for(int i=0;i<8;++i) render();
+    pad.left_x=0; prosperity_set_gamepad(core,&pad); render();
+    Save(device.Get(), context.Get(), image.Get(),
+         std::filesystem::path(argv[4]) / L"stick-pointer-only.bmp");
     Save(device.Get(), context.Get(), image.Get(),
          std::filesystem::path(argv[4]) / L"home.bmp");
     key('S', true);
@@ -276,6 +293,9 @@ int wmain(int argc, wchar_t** argv) {
       click(1100,545); render();
       prosperity_frontend_info removed{}; removed.size=sizeof(removed); prosperity_frontend_get_info(frontend,&removed);
       Check(removed.games==11,"remove selected library entry");
+      { auto expected=(dir/"fixture-02.elf").generic_u8string(); std::string hex; const char* digits="0123456789abcdef"; for(unsigned char c:expected) {hex+=digits[c>>4];hex+=digits[c&15];}
+        std::ifstream index(dir/"recent-games",std::ios::binary); std::string line; std::getline(index,line);
+        Check(line.rfind(hex+"\t",0)==0,"left stick must not change selected game"); }
       Check(std::filesystem::exists(dir/"fixture-01.elf"),"remove preserves game file");
     }
     // Multiple producers emulate keyboard/pointer/focus events arriving while

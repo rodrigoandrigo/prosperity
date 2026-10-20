@@ -21,11 +21,24 @@ namespace Prosperity_UWP
 		DirectXPage();
 		virtual ~DirectXPage();
         void LaunchTitle(Platform::String^ path);
+        void ValidatePointerPages();
 
 		void SaveInternalState(Windows::Foundation::Collections::IPropertySet^ state);
 		void LoadInternalState(Windows::Foundation::Collections::IPropertySet^ state);
 
 	private:
+        void UpdateSystemPointer();
+        void InitializePointerPages();
+        void SwitchPointerPage(bool hidden);
+        bool m_xbox = false;
+        bool m_pointerHidden = false;
+        bool m_pointerFailed = false;
+        bool m_backRegistered = false;
+        Windows::UI::Xaml::Controls::Frame^ m_pointerFrame;
+        Windows::UI::Xaml::Controls::Page^ m_menuPointerPage;
+        Windows::UI::Xaml::Controls::Page^ m_gamePointerPage;
+        Windows::UI::Xaml::UIElement^ m_pointerSurface;
+        Windows::Foundation::EventRegistrationToken m_backToken;
         void OpenPicker(bool folder, bool modules = false);
 		// Manipulador de eventos de renderização de baixo nível XAML.
 
