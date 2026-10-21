@@ -28,6 +28,9 @@
 #include "kern/save_storage.h"
 #include "kern/vfs.h"
 #include "options/options.h"
+#if defined(DELTA_UWP)
+#include "io/path.h"
+#endif
 
 namespace {
 DELTA_OPTION(const char*, kSavedataDir, "DELTA_SAVEDATA_DIR", nullptr);
@@ -37,11 +40,15 @@ namespace kern::ipmi {
 base::String SaveDataRoot() {
   if (kSavedataDir)
     return kSavedataDir.get();
+#if defined(DELTA_UWP)
+  return io::MakeAbsPath(base::String("savedata"));
+#else
   base::StringU8 home;
   base::GetEnvironmentVariable(u8"HOME", home);
   return base::String(
              home.empty() ? "." : reinterpret_cast<const char*>(home.c_str())) +
          "/.prosperity/savedata";
+#endif
 }
 
 namespace {
@@ -199,9 +206,12 @@ void Clear(ClientState& state) {
 i32 Store(const base::String& path, const void* data, size_t size);
 i32 MigrateMemory(const base::String& dir, const MemoryState& memory);
 
+// The PS5 library names a slot's segments after an id it generates for each
+// setup: /SceSaveData<app><user>_<slot>_<i>_<id>.
 i32 SetupMemory(MemoryState& state,
                 const Pending& pending,
-                u32 slot = UINT32_MAX) {
+                u32 slot = UINT32_MAX,
+                const base::String& id = {}) {
   auto* process = Process::GetActive();
   if (!process)
     return kInternal;
@@ -229,15 +239,21 @@ i32 SetupMemory(MemoryState& state,
     if (i == count) {
       if (slot == UINT32_MAX)
         std::snprintf(name, sizeof(name), "/SceSaveDataI%08x%08x", app, 1);
-      else
+      else if (id.empty())
         std::snprintf(name, sizeof(name), "/SceSaveDataI%08x%08x_%u", app, 1,
                       slot);
+      else
+        std::snprintf(name, sizeof(name), "/SceSaveDataI%08x%08x_%u_%s", app, 1,
+                      slot, id.c_str());
     } else {
       if (slot == UINT32_MAX)
         std::snprintf(name, sizeof(name), "/SceSaveData%08x%08x_%u", app, 1, i);
-      else
+      else if (id.empty())
         std::snprintf(name, sizeof(name), "/SceSaveData%08x%08x_%u_%u", app, 1,
                       slot, i);
+      else
+        std::snprintf(name, sizeof(name), "/SceSaveData%08x%08x_%u_%u_%s", app,
+                      1, slot, i, id.c_str());
     }
     const auto result = ShmCreate(name, i == count ? 64 : total);
     if (result) {
@@ -302,13 +318,15 @@ bool MemoryDirectory(const base::String& dir) {
 
 i32 SetupMemorySlot(ClientState& state, const Pending& pending) {
   const auto* data = pending.data.data();
-  base::String dir;
+  base::String dir, id;
   const u32 slot = Read<u32>(data, 0x56c);
   if (!String(data + 0x558, 16, dir) || !MemoryDirectory(dir) || slot >= 4 ||
       data[0x568] != 1 ||
       std::any_of(data + 0x569, data + 0x56c,
                   [](u8 value) { return value != 0; }) ||
-      std::any_of(data + 0x570, data + 0x590,
+      data[0x570] > 1 || !String(data + 0x571, 23, id) ||
+      (!id.empty() && !Component(id)) ||
+      std::any_of(data + 0x588, data + 0x590,
                   [](u8 value) { return value != 0; }))
     return kParameter;
   if (state.memory_slots.count(dir.c_str()) ||
@@ -318,7 +336,7 @@ i32 SetupMemorySlot(ClientState& state, const Pending& pending) {
                   }))
     return kBusy;
   MemoryState memory;
-  if (const auto result = SetupMemory(memory, pending, slot))
+  if (const auto result = SetupMemory(memory, pending, slot, id))
     return result;
   if (const auto result = MigrateMemory(dir, memory)) {
     ClearMemory(memory);
@@ -473,8 +491,11 @@ i32 SaveHost(const u8* data, base::String& host, bool& exists) {
 i32 CreateSave(const base::String& host, u64 blocks) {
   std::error_code error;
   std::filesystem::create_directories(host.c_str(), error);
-  if (error)
+  if (error) {
+    BASE_LOGE("savedata", "cannot create save directory {}: {} ({})",
+              host.c_str(), error.message().c_str(), error.value());
     return kInternal;
+  }
   if (const auto result = Store(host + "/.sce_quota.bin", &blocks, 8)) {
     std::filesystem::remove_all(host.c_str(), error);
     return result;
@@ -950,6 +971,9 @@ i32 Delete(const Pending& pending) {
 i32 Store(const base::String& path, const void* data, size_t size) {
   const auto root = std::filesystem::path(path.c_str()).parent_path().string();
   const auto result = save_storage::Replace(root.c_str(), path, data, size);
+  if (result)
+    BASE_LOGE("savedata", "cannot replace save file {} (root={}, result={})",
+              path.c_str(), root.c_str(), result);
   if (result == -static_cast<i32>(SysError::eNOSPC))
     return static_cast<i32>(0x809f000au);
   return result ? kInternal : 0;

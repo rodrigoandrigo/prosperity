@@ -36,6 +36,7 @@
 #include "kern/lv2/stub_log.h"
 #include "kern/lv2/sys_mem.h"
 #include "kern/module.h"
+#include "kern/memory_budget.h"
 #include "kern/process.h"
 #include "kern/ps4/audio_daemon.h"
 #include "kern/ps4/dev/dma_dev.h"  // DmemBackingFd/Size (shared physical dmem store)
@@ -655,21 +656,7 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
     if (size >= min_b) {
       BASE_LOGI("mmap-caller", "size={:#x} prot={:#x} flags={:#x} fd={}:", size,
                 prot, flags, fd);
-      auto* sp = reinterpret_cast<uintptr_t*>(__builtin_frame_address(0));
-      int shown = 0;
-      for (int i = 0; i < 8192 && shown < 12; i++) {
-        uintptr_t v = sp[i];
-        for (auto& m : proc->GetModuleList()) {
-          auto& mi = m->GetInfo();
-          auto* t = mi.text_seg.addr;
-          if (t && v >= (uintptr_t)t && v < (uintptr_t)t + mi.text_seg.size) {
-            BASE_LOGI("mmap-caller", "  sp+{:<4x} {}+{:#x}", i * 8,
-                      mi.name.c_str(), v - (uintptr_t)t);
-            shown++;
-            break;
-          }
-        }
-      }
+      GuestStackTrace("mmap-caller", 12);
     }
   }
 
@@ -762,6 +749,13 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
       reinterpret_cast<uintptr_t>(addr) < kGuestArenaFloor)
     addr = nullptr;
 
+  const bool flexible = fd == static_cast<u32>(-1) && !void_reserve && prot;
+  if (flexible &&
+      !AdmitFlexible(proc->GetVma(),
+                     (flags & MFlags::kFixed) ? static_cast<u8*>(addr) : nullptr,
+                     size))
+    return reinterpret_cast<u8*>(-SysError::eNOMEM);
+
   void* ptr = nullptr;
   if (addr) {
     if (flags & MFlags::kFixed) {
@@ -824,7 +818,8 @@ sys_mmap(void* addr, size_t size, u32 prot, u32 flags, u32 fd, size_t offset) {
   if (dmem_map)
     proc->GetVma().AddDirect(static_cast<u8*>(ptr), size, gprot, prot, offset);
   else
-    proc->GetVma().Add(static_cast<u8*>(ptr), size, gprot, prot, void_reserve);
+    proc->GetVma().Add(static_cast<u8*>(ptr), size, gprot, prot, void_reserve,
+                       flexible);
 
   host_memory::ProtectMem(static_cast<void*>(ptr), size, Ppt::kRwx);
 
@@ -1788,22 +1783,40 @@ int PS4ABI sys_get_kernel_mem_statistics(void* out) {
   return 0;
 }
 
-// Carve a mapping out of a block pool. We don't model pools, so back it with a
-// plain anonymous RW region of the requested length. Logged once because the
-// pool handle and any accounting it implies are ignored.
-i64 PS4ABI sys_blockpool_map(i64 pool, size_t len, u32 prot, u32 flags) {
-  (void)pool;
-  (void)prot;
-  (void)flags;
-  static base::Atomic<bool> once{false};
-  LogOnce(once, "blockpool_map backs the pool with a plain anon region");
-  return (i64)sys_mmap(nullptr, len, 3 /*rw*/, 0x1000 /*anon*/, -1, 0);
-}
-
-int PS4ABI sys_blockpool_unmap() {
+// sceKernelMemoryPoolCommit (addr, len, type, prot, flags): back [addr, len)
+// inside a range the guest reserved by mapping the pool descriptor. That
+// reservation is already ordinary RW memory here, so a commit only has to make
+// sure the range is mapped; it must not hand out new memory (Unreal commits
+// and decommits 2 MiB blocks thousands of times a minute).
+i64 PS4ABI sys_blockpool_map(u8* addr, size_t len, u32 type, u32 prot) {
+  (void)type;
+  auto* proc = Process::GetActive();
+  if (!proc || !addr || !len || (reinterpret_cast<uintptr_t>(addr) & 0x3FFF))
+    return -SysError::eINVAL;
+  if (!host_memory::IsMemoryRangeMapped(addr, len)) {
+    u8* p = sys_mmap(addr, len, prot ? prot : 3, MFlags::kAnon | MFlags::kFixed,
+                     static_cast<u32>(-1), 0);
+    if (IsErrnoPtr(p))
+      return reinterpret_cast<i64>(p);
+  }
   return 0;
 }
+
+// sceKernelMemoryPoolDecommit (addr, len, flags): the blocks go back to the
+// pool and the range stays reserved, so release the host pages.
+int PS4ABI sys_blockpool_unmap(u8* addr, size_t len) {
+  auto* proc = Process::GetActive();
+  if (!proc || !addr || !len || (reinterpret_cast<uintptr_t>(addr) & 0x3FFF))
+    return -SysError::eINVAL;
+  if (host_memory::IsMemoryRangeMapped(addr, len))
+    proc->GetVma().Discard(addr, len);
+  return 0;
+}
+// sceKernelMemoryPoolBatch: its commits and decommits are not applied yet, so
+// a title decommitting through it keeps its host pages. Logged once.
 i64 PS4ABI sys_blockpool_batch(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5) {
+  static base::Atomic<bool> once{false};
+  LogOnce(once, "blockpool_batch operations are not applied");
   if (kBlockpoolTrace) {
     BASE_LOGI("blockpool_batch",
               "a0={:#x} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x}",
@@ -1833,9 +1846,9 @@ int PS4ABI sys_getpagesize() {
   return 16384;
 }
 
-// sys_blockpool_open (653): descriptor for the flexible-memory block pool.
-// Unmodelled; the boot caller never feeds it to blockpool_map/mmap, so return a
-// fixed positive non-stdio handle.
+// sys_blockpool_open (653): descriptor of the memory pool. Mapping it reserves
+// address space for sys_blockpool_map; the pool itself is not modelled, so a
+// fixed positive non-stdio handle does.
 int PS4ABI sys_blockpool_open() {
   return 0x4000;
 }

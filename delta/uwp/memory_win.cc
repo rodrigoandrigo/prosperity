@@ -335,10 +335,51 @@ extern "C" int prosperity_mincore(void* address, size_t length, unsigned char* o
 extern "C" int prosperity_madvise(void* address, size_t length, int advice) {
   if (!Span(address, length)) { errno = EINVAL; return -1; }
   if (advice == MADV_DONTDUMP) return 0; // AppContainer has no guest-controlled process dumps.
-  // Shared backing cannot be decommitted without invalidating other aliases.
   if (advice != MADV_DONTNEED && advice != MADV_FREE) { errno = EINVAL; return -1; }
-  errno = ENOTSUP;
-  return -1;
+  // MADV_FREE may retain contents; only DONTNEED promises zero-filled pages.
+  if (advice == MADV_FREE) { errno = ENOTSUP; return -1; }
+  const auto begin = reinterpret_cast<uintptr_t>(address);
+  if (begin & (kPage - 1)) { errno = EINVAL; return -1; }
+  auto& state = Registry(); std::lock_guard lock(state.mutex);
+  const auto end = begin + Up(length);
+  std::vector<std::pair<uintptr_t, Mapping>> replacements;
+  std::vector<std::shared_ptr<Backing>> old_backings;
+  for (auto cursor = begin; cursor < end;) {
+    auto it = Find(state, cursor);
+    if (it == state.maps.end() || !it->second.present || !it->second.backing) { errno = ENOMEM; return -1; }
+    const auto& original = it->second;
+    if (!original.backing->name.empty()) { errno = ENOTSUP; return -1; }
+    // A descriptor-backed section can have aliases outside this view. Never
+    // discard its contents as though it were private anonymous memory.
+    for (const auto& [fd, backing] : state.descriptors)
+      if (backing == original.backing) { errno = ENOTSUP; return -1; }
+    const auto next = std::min(end, original.end);
+    auto replacement = original;
+    replacement.end = next;
+    replacement.offset = 0;
+    replacement.mapped = false;
+    replacement.backing = NewBacking(original.backing->executable);
+    replacement.backing->size = next - cursor;
+    replacements.emplace_back(cursor, std::move(replacement));
+    if (std::find(old_backings.begin(), old_backings.end(), original.backing) == old_backings.end())
+      old_backings.push_back(original.backing);
+    cursor = next;
+  }
+  if (!RemoveRange(state, begin, end)) return Failure();
+  for (auto& entry : replacements) state.maps.insert_or_assign(entry.first, std::move(entry.second));
+  // Release whole physical chunks no longer used by a surviving view. Partial
+  // chunks remain alive for their neighbours; new discarded ranges are lazy.
+  for (const auto& backing : old_backings) {
+    for (auto chunk = backing->chunks.begin(); chunk != backing->chunks.end();) {
+      bool live = false;
+      const auto lo = chunk->first * kChunkSize, hi = lo + kChunkSize;
+      for (const auto& [first, mapping] : state.maps)
+        if (mapping.present && mapping.backing == backing && mapping.offset < hi &&
+            mapping.offset + mapping.end - first > lo) { live = true; break; }
+      if (live) ++chunk; else chunk = backing->chunks.erase(chunk);
+    }
+  }
+  return 0;
 }
 extern "C" int prosperity_memfd_create(const char* name, unsigned) {
   auto& state = Registry();
@@ -376,6 +417,11 @@ prosperity_memory_info MemoryInfo() {
   auto& state = Registry(); std::lock_guard lock(state.mutex);
   return {sizeof(prosperity_memory_info), committedBytes.load(), ramChunks.load(), kChunkSize,
       kCommitSize, state.policy.cap_bytes, state.policy.reserve_bytes, rejectedCommits.load()};
+}
+bool QueryApplicationMemory(uint64_t& usage, uint64_t& limit) {
+  auto& state = Registry(); std::lock_guard lock(state.mutex);
+  usage = limit = 0;
+  return state.policy.query && state.policy.query(state.policy.user, &usage, &limit) == 0;
 }
 int FindMemoryFile(const char* name, uint64_t& size) {
   auto& state = Registry(); std::lock_guard lock(state.mutex);

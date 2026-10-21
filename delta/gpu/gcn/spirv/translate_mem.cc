@@ -1199,6 +1199,57 @@ void EmitGfxMtbuf(Translator& t, const Inst& inst, StageContext& sc) {
                                           t.U32(kGfxBufferDwords - 1))));
 }
 
+namespace {
+
+// The SGPRs an instruction other than an SMRD load writes. A shader can
+// rebuild a descriptor in place (s_getpc + s_add for a table in its own code,
+// s_mov for the format words), and a use after that is a different resource.
+bool ScalarWrites(const Inst& inst, u32& first, u32& count) {
+  const u32 w = inst.raw[0], op = inst.opcode;
+  count = 1;
+  switch (inst.enc) {
+    case Enc::kSop1:
+      first = (w >> 16) & 0x7F;
+      if (op == 0x04 || op == 0x06 || op == 0x08 || op == 0x0a || op == 0x0c ||
+          op == 0x1f || op == 0x21 || (op >= 0x24 && op <= 0x2b) || op == 0x2d)
+        count = 2;
+      return true;
+    case Enc::kSop2:
+      first = (w >> 16) & 0x7F;
+      if ((op >= 0x0b && op <= 0x1f && (op & 1)) || op == 0x21 || op == 0x23 ||
+          op == 0x25 || op == 0x29 || op == 0x2a)
+        count = 2;
+      return true;
+    case Enc::kSopk:
+      first = (w >> 16) & 0x7F;
+      return op == 0x00 || op == 0x02 || op == 0x0f || op == 0x10 ||
+             op == 0x12;
+    case Enc::kVop1:
+      first = (w >> 17) & 0xFF;
+      return op == 0x02;
+    case Enc::kVop2:
+      first = (w >> 17) & 0xFF;
+      return op == 0x01;
+    case Enc::kVop3:
+      if (op == 0x101 || op == 0x182) {
+        first = w & 0xFF;
+        return true;
+      }
+      count = 2;
+      if (op < 0x100) {
+        first = w & 0xFF;
+        return true;
+      }
+      first = (w >> 8) & 0x7F;
+      return (op >= 0x125 && op <= 0x12a) || op == 0x16d || op == 0x16e ||
+             op == 0x176 || op == 0x177;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 bool PlanCsResources(const Program& program,
                      const u8* reachable,
                      u32 lds_dwords,
@@ -1211,10 +1262,12 @@ bool PlanCsResources(const Program& program,
   };
   base::Vector<ScalarLoad> loads;
   const auto descriptor_version = [&](u32 sgpr, u32 dwords) {
-    for (auto it = loads.rbegin(); it != loads.rend(); ++it)
-      if (sgpr >= it->sgpr && sgpr + dwords <= it->sgpr + it->dwords)
-        return it->version;
-    return UINT32_MAX;
+    u32 version = UINT32_MAX;
+    for (const ScalarLoad& ld : loads)
+      if (sgpr < ld.sgpr + ld.dwords && ld.sgpr < sgpr + dwords)
+        version = version == UINT32_MAX ? ld.version
+                                        : base::Max(version, ld.version);
+    return version;
   };
   base::HashMap<u64, u32> resource_by_version;
   const auto resource = [&](u32 pc, u32 base_sgpr, u32 dwords, u8 kind,
@@ -1251,6 +1304,16 @@ bool PlanCsResources(const Program& program,
     return offen || soffset != 0x80 ? kUnknownStoreExtent : (w & 0xFFF) + bytes;
   };
 
+  const auto overwrite = [&](u32 first, u32 n, u32 version) {
+    loads.erase(base::RemoveIf(loads.begin(), loads.end(),
+                               [&](const auto& ld) {
+                                 return first < ld.sgpr + ld.dwords &&
+                                        ld.sgpr < first + n;
+                               }),
+                loads.end());
+    loads.push_back({first, n, version});
+  };
+
   bool uses_gds = false;
   u32 idx = 0;
   for (const Inst& inst : program) {
@@ -1277,14 +1340,7 @@ bool PlanCsResources(const Program& program,
         if (!resource(inst.pc, base_sgpr, kind == 2 ? 2 : 4, kind, false, bytes,
                       true))
           return false;
-        const u32 sdst = (w >> 15) & 0x7F;
-        loads.erase(base::RemoveIf(loads.begin(), loads.end(),
-                                   [&](const auto& ld) {
-                                     return sdst < ld.sgpr + ld.dwords &&
-                                            ld.sgpr < sdst + n;
-                                   }),
-                    loads.end());
-        loads.push_back({sdst, n, inst_idx});
+        overwrite((w >> 15) & 0x7F, n, inst_idx);
         break;
       }
       case Enc::kMubuf: {
@@ -1350,8 +1406,12 @@ bool PlanCsResources(const Program& program,
         if (!lds_dwords && inst.opcode != 0x35)
           return reject("cs.plan.ds-without-lds");
         break;
-      default:
+      default: {
+        u32 first = 0, n = 0;
+        if (ScalarWrites(inst, first, n))
+          overwrite(first, n, inst_idx);
         break;
+      }
     }
   }
   if (uses_gds)
@@ -2307,6 +2367,38 @@ static void EmitCsMimgStaged(Translator& t,
                               logical_or(is_block2, is_rgba32_raw));
   const Id wide4 = logical_or(is_r11g11b10f, is_rgba32_raw);
 
+  // A read-only single-mip linear 8/16-bit image is bound as the guest bytes
+  // instead of a copy widened to one dword per texel.
+  const bool may_pack = !t.rdna_sources && !sc.cs_written.count(binding);
+  Id packed = 0, packed_bytes = 0;
+  if (may_pack) {
+    const Id tiling = field(3, 20, 0x1F);
+    const Id narrow = logical_or(t.Eq(dfmt, t.U32(1)),
+                                 logical_or(t.Eq(dfmt, t.U32(2)),
+                                            t.Eq(dfmt, t.U32(3))));
+    packed = t.LAnd(
+        t.LAnd(logical_or(t.Eq(tiling, t.U32(8)), t.Eq(tiling, t.U32(31))),
+               t.IsZero(last_mip)),
+        narrow);
+    packed_bytes = t.SelectB(t.Eq(dfmt, t.U32(1)), t.U32(1), t.U32(2));
+  }
+  const auto packed_word = [&](Id texel, Id word) {
+    return may_pack ? t.SelectB(packed,
+                                t.Shr(t.Mul(texel, packed_bytes), t.U32(2)),
+                                word)
+                    : word;
+  };
+  const auto packed_value = [&](Id texel, Id raw) {
+    if (!may_pack)
+      return raw;
+    const Id shift =
+        t.Shl(t.And(t.Mul(texel, packed_bytes), t.U32(3)), t.U32(3));
+    const Id mask = t.SelectB(t.Eq(packed_bytes, t.U32(1)), t.U32(0xFF),
+                              t.U32(0xFFFF));
+    return t.SelectB(packed, t.And(t.Shr(raw, shift), mask), raw);
+  };
+  dword_idx = packed_word(texel_idx, dword_idx);
+
   const auto swizzle = [&](const Id values[4], u32 component) {
     const Id selector = field(3, component * 3, 7);
     const Id one = t.SelectB(is_int, t.U32(1), t.U32(0x3f800000));
@@ -2319,7 +2411,8 @@ static void EmitCsMimgStaged(Translator& t,
   };
 
   if (load) {
-    const Id raw = CsSsboLoad(t, sc, binding, dword_idx);
+    const Id raw =
+        packed_value(texel_idx, CsSsboLoad(t, sc, binding, dword_idx));
     const Id has_second = wide2;
     const Id raw_hi = CsSsboLoad(
         t, sc, binding,
@@ -2379,15 +2472,15 @@ static void EmitCsMimgStaged(Translator& t,
   } else if (sample || gather) {
     const Id has_second = wide2;
     const auto texel_at = [&](Id xx, Id yy) {
-      Id ti = t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
-      ti = t.SelectB(is_rgba16, t.Mul(ti, t.U32(2)), ti);
-      ti = t.SelectB(is_r11g11b10f, t.Mul(ti, t.U32(4)), ti);
-      ti = t.SelectB(is_block2, t.Mul(ti, t.U32(2)), ti);
-      ti = t.SelectB(is_rgba32_raw, t.Mul(ti, t.U32(4)), ti);
-      return ti;
+      return t.Add(mip_off, t.Add(layer_off, t.Add(t.Mul(yy, pitch), xx)));
     };
-    const auto decode = [&](Id idx, Id out[4]) {
-      const Id raw = CsSsboLoad(t, sc, binding, idx);
+    const auto decode = [&](Id texel, Id out[4]) {
+      Id idx = t.SelectB(is_rgba16, t.Mul(texel, t.U32(2)), texel);
+      idx = t.SelectB(is_r11g11b10f, t.Mul(texel, t.U32(4)), idx);
+      idx = t.SelectB(is_block2, t.Mul(texel, t.U32(2)), idx);
+      idx = t.SelectB(is_rgba32_raw, t.Mul(texel, t.U32(4)), idx);
+      idx = packed_word(texel, idx);
+      const Id raw = packed_value(texel, CsSsboLoad(t, sc, binding, idx));
       const Id raw_hi = CsSsboLoad(
           t, sc, binding, t.SelectB(has_second, t.Add(idx, t.U32(1)), idx));
       const Id raw_2 = CsSsboLoad(t, sc, binding,

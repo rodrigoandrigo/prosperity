@@ -91,6 +91,22 @@ TEST_F(AgcGraphics, EopFlipPresentsBeforeReleasingBufferForLaterPackets) {
   g_accept_draw = false;
 }
 
+TEST_F(AgcGraphics, FenceValueMatchingAFlipContextDoesNotFlip) {
+  u64 label = 1, fence = 0;
+  g_presented = 0;
+  g_eop_context = 5;
+  g_eop_label = &label;
+  Words words;
+  Packet(words, 0x49,
+         {0, (2u << 29) | (2u << 24), Lo(&fence), Hi(&fence), 5, 0, 0});
+  EXPECT_EQ(Submit(words, 203), words.size());
+  EXPECT_EQ(g_presented, 0u);
+  EXPECT_EQ(g_eop_context, 5u);
+  EXPECT_EQ(label, 1u);
+  g_eop_label = nullptr;
+  g_eop_context = 0;
+}
+
 TEST_F(AgcGraphics, WaitsForComputeBeforeLaterSubmitsAndFlip) {
   u32 ready = 0, count = 0;
   Words first, second, check;
@@ -404,7 +420,6 @@ void DispatchCompute(render::Renderer&,
 
 namespace gpu::render {
 struct BackendState {};
-u64 g_ns_dcb = 0, g_ns_dcb_lock = 0;
 u32 g_submit_queue = 0;
 u32 g_dcb_n = 0;
 Renderer& DefaultRenderer() {
@@ -454,6 +469,9 @@ bool ReadGds(Renderer&, u32 offset, void* data, u32 bytes) {
 bool CopyGdsToGuest(u32 offset, u64 address, u32 bytes) {
   std::memcpy(reinterpret_cast<void*>(address), g_gds.data() + offset, bytes);
   return true;
+}
+bool CopyGuestToGds(Renderer&, u64, u32, u32) {
+  return false;
 }
 bool WriteGds(Renderer&, u32 offset, const void* data, u32 bytes) {
   std::memcpy(g_gds.data() + offset, data, bytes);

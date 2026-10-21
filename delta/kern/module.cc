@@ -7,6 +7,7 @@
  */
 
 #include <sys/mman.h>
+#include <cerrno>
 #include "base/arch.h"
 #include "base/logging.h"
 #include "base/math/alignment.h"
@@ -38,6 +39,7 @@
 #include "kern/vfs.h"
 #include "options/options.h"
 #include "runtime/nid.h"
+#include "kern/ps4/razor_gpu_trace.h"
 
 namespace {
 DELTA_OPTION(const char*, kDumpModule, "DELTA_DUMP_MODULE", nullptr);
@@ -58,6 +60,10 @@ MainImageHook g_main_image_hook = nullptr;
 
 void SetMainImageHook(MainImageHook hook) {
   g_main_image_hook = hook;
+}
+
+void ResetModuleAddressCursor() {
+  s_next_base = kModuleRegionBase;
 }
 
 Module::Module(Process* process) : process_(process) {
@@ -188,10 +194,11 @@ bool Module::FromMem(base::UniquePointer<u8[]> data) {
   // One line per module so tools can turn a raw guest address into
   // module+offset, and through the .eh_frame_hdr search table (every
   // function's start) into a function (tools/drun.py --perf).
-  BASE_LOGI("modmap", "{} base={:#x} size={:#x} ehhdr={:#x}",
-            info_.name.c_str(), reinterpret_cast<uintptr_t>(info_.base),
+  BASE_LOGI("modmap", "{} base={:#x} size={:#x} ehhdr={:#x} image_name={}",
+            load_name_.empty() ? info_.name.c_str() : load_name_.c_str(),
+            reinterpret_cast<uintptr_t>(info_.base),
             info_.code_size + info_.rip_zone_size,
-            reinterpret_cast<uintptr_t>(info_.eh_frame_addr));
+            reinterpret_cast<uintptr_t>(info_.eh_frame_addr), info_.name.c_str());
 
   // Log audio output entry points for diagnostics.
   if (info_.name.find("AudioOut") != base::String::npos) {
@@ -287,10 +294,15 @@ void Module::DigestDynamic() {
         auto name = (const char*)(strtab_.ptr + (d->un.value & 0xFFFFFFFF));
         if (name) {
           base::String xname(name);
-          /*quick but (valid?) hack for determining if an object is exported*/
-          auto pos = xname.find(".prx");
-          if (pos != base::String::npos) {
-            shared_objects_.push_back(xname.substr(0, pos));
+          // Unity declares mono-ps4.sprx in DT_NEEDED. Recognize both SCE
+          // suffixes so it is loaded before the first import/relocation pass.
+          for (const char* extension : {".sprx", ".prx"}) {
+            const auto length = std::strlen(extension);
+            if (xname.length() > length &&
+                !std::strcmp(xname.c_str() + xname.length() - length, extension)) {
+              shared_objects_.push_back(xname.substr(0, xname.length() - length));
+              break;
+            }
           }
         }
 
@@ -652,18 +664,29 @@ bool Module::MapImage() {
     // address while the boot is being worked on; switch to kernel-chosen later.
     // The largest image (an eboot) is well under 100 MiB with its rip-zone.
     constexpr size_t kModuleSlot = 2ull * 1024ull * kOneMb;
-    if (s_next_base + kModuleSlot > kModuleRegionEnd) {
-      LOG_ERROR("mapImage: module region full at {:#x}", s_next_base);
+    while (s_next_base + kModuleSlot <= kModuleRegionEnd) {
+      const auto candidate = s_next_base;
+      s_next_base += kModuleSlot;
+      info_.base = static_cast<u8*>(host_memory::AllocMem(
+          reinterpret_cast<void*>(candidate), kModuleSlot,
+          host_memory::PageProtection::kW,
+          host_memory::AllocationType::kReserve));
+      if (info_.base) break;
+      const int error = errno;
+#if defined(DELTA_UWP)
+      const bool collision = error == EEXIST || GetLastError() == ERROR_INVALID_ADDRESS;
+#else
+      const bool collision = error == EEXIST;
+#endif
+      LOG_WARNING("mapImage: {} cannot reserve {:#x} (errno={}, collision={})",
+                  load_name_.c_str(), candidate, error, collision);
+      if (!collision) return false;
+    }
+    if (!info_.base) {
+      LOG_ERROR("mapImage: module region full for {} at {:#x}",
+                load_name_.c_str(), s_next_base);
       return false;
     }
-    info_.base = static_cast<u8*>(
-        host_memory::AllocMem(reinterpret_cast<void*>(s_next_base), kModuleSlot,
-                              host_memory::PageProtection::kW,
-                              host_memory::AllocationType::kReserve));
-    s_next_base += kModuleSlot;
-
-    if (!info_.base)
-      return false;
 
     // The lifter emits a per-fs-access stub into the rip-zone; linear-sweep
     // lifts the whole segment, so size the zone to the code (stubs ~32 B,
@@ -671,9 +694,16 @@ bool Module::MapImage() {
     info_.rip_zone_size = base::Max<size_t>(info_.rip_zone_size, code_size);
 
     // immediately take module memory + rip Zone memory
-    host_memory::AllocMem(info_.base, code_size + info_.rip_zone_size,
+    if (code_size > kModuleSlot || info_.rip_zone_size > kModuleSlot - code_size ||
+        !host_memory::AllocMem(info_.base, code_size + info_.rip_zone_size,
                           host_memory::PageProtection::kW,
-                          host_memory::AllocationType::kCommit);
+                          host_memory::AllocationType::kCommit)) {
+      LOG_ERROR("mapImage: cannot commit {} image ({:#x} bytes, errno={})",
+                load_name_.c_str(), code_size + info_.rip_zone_size, errno);
+      host_memory::FreeMem(info_.base, kModuleSlot);
+      info_.base = nullptr;
+      return false;
+    }
 
     info_.code_size = code_size;
     info_.rip_zone = info_.base + code_size;
@@ -819,6 +849,20 @@ static bool DecodeNid(const char* name, u64& lid, u64& mid) {
 }
 
 bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
+  ptr_out = 0;
+  // SDK CRT hooks are plain ELF symbols, not encoded SCE NIDs. Lifecycle
+  // hooks belong to this image: an absent weak module_stop must not bind to
+  // another plugin's implementation.
+  if (!std::strchr(name, '#')) {
+    ptr_out = GetSymbol2(name);
+    if (!ptr_out && std::strcmp(name, "module_start") &&
+        std::strcmp(name, "module_stop")) {
+      for (auto& candidate : process_->GetModuleList()) {
+        if ((ptr_out = candidate->GetSymbol2(name))) break;
+      }
+    }
+    return ptr_out != 0;
+  }
   // PS5 imports resolve by NID, preferring the named module before searching
   // all loaded modules.
   if (ps5_layout_) {
@@ -875,11 +919,6 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
   for (auto& mod : imp_modules_) {
     if (mod.id == static_cast<i32>(modid)) {
       auto xmod = process_->GetModule(mod.name);
-      if (!xmod) {
-        LOG_ERROR("resolveObfSymbol: Unknown module {} ({}) requestd", mod.name,
-                  mod.id);
-        return false;
-      }
 
       char nameenc[12]{};  // name + null terminator
       std::strncpy(nameenc, name, 11);
@@ -889,6 +928,31 @@ bool Module::ResolveObfSymbol(const char* name, uintptr_t& ptr_out) {
       long_name += libname;
       long_name += "#";
       long_name += mod.name;
+      // Requested filenames identify loaded instances, while SCE imports name
+      // their ELF provider. Ssl2 declares libSceSsl internally. Match that
+      // provider only when it actually exports this fully qualified symbol;
+      // do not merge distinct modules merely because their names coincide.
+      if (!xmod) {
+        for (auto& candidate : process_->GetModuleList()) {
+          if (candidate->GetInfo().name == mod.name &&
+              candidate->GetSymbolFullName(long_name.c_str())) {
+            xmod = candidate;
+            break;
+          }
+        }
+      }
+      if (!xmod) {
+        if (!std::strcmp(mod.name, "libSceRazorGpuThreadTrace") &&
+            !std::strcmp(nameenc, "eQnlGJJAFsA")) {
+          ptr_out = cpu::MakeHostThunk(
+              reinterpret_cast<void*>(&ps4::RazorGpuThreadTraceGetInterface),
+              "libSceRazorGpuThreadTrace!eQnlGJJAFsA");
+          return ptr_out != 0;
+        }
+        LOG_ERROR("resolveObfSymbol: Unknown module {} ({}) requested", mod.name,
+                  mod.id);
+        return false;
+      }
       ptr_out = xmod->GetSymbolFullName(long_name.c_str());
 
       // libkernel forwards some exports to libkernel_sys under the name
@@ -935,21 +999,20 @@ bool Module::ResolveImports() {
     i32 type = ELF64_R_TYPE(r->info);
     i32 isym = ELF64_R_SYM(r->info);
 
-    ElfSym* sym = &symbols_[isym];
-
-    if (retry && *GetAddress<uintptr_t>(r->offset) != addr_bad_call)
-      continue;
-
     if (type != R_X86_64_JUMP_SLOT) {
       LOG_WARNING("resolveImports: bad jump slot {}", i);
       continue;
     }
 
-    if ((u32)isym >= num_symbols_ || sym->st_name >= strtab_.size) {
+    if ((u32)isym >= num_symbols_ || symbols_[isym].st_name >= strtab_.size) {
       LOG_WARNING("resolveImports: bad symbol index {} for relocation {}", isym,
                   i);
       continue;
     }
+
+    ElfSym* sym = &symbols_[isym];
+    if (retry && *GetAddress<uintptr_t>(r->offset) != addr_bad_call)
+      continue;
 
     i32 binding = ELF64_ST_BIND(sym->st_info);
     if (binding == STB_LOCAL) {
@@ -970,6 +1033,12 @@ bool Module::ResolveImports() {
 
     // unresolved import (missing dep): point at the badcall stub, don't fail
     if (!ResolveObfSymbol(name, addr) || !addr) {
+      if (binding == STB_WEAK && sym->st_shndx == 0) {
+        // ELF undefined weak references resolve to zero, including PLT slots.
+        // The SDK checks these optional hook pointers before invoking them.
+        *GetAddress<uintptr_t>(r->offset) = 0;
+        continue;
+      }
       addr = addr_bad_call;
       unresolved_imports_++;
       if (!retry)
@@ -1031,10 +1100,14 @@ bool Module::ApplyRelocations() {
       else {
         const char* name = &strtab_.ptr[sym->st_name];
 
-        // unresolved import (missing dep): skip, leave the slot zeroed
+        // Undefined weak references have the ELF value zero; still apply the
+        // relocation/addend. Strong missing providers remain pending.
         if (!ResolveObfSymbol(name, sym_val) || !sym_val) {
-          unresolved_relocations_.push_back(i);
-          continue;
+          if (bind != STB_WEAK || sym->st_shndx != 0) {
+            unresolved_relocations_.push_back(i);
+            continue;
+          }
+          sym_val = 0;
         }
         if (retry) BASE_LOGI("reloc", "late-bound data {} in {} at {:#x}", name, info_.name.c_str(), r->offset);
       }
@@ -1194,6 +1267,40 @@ uintptr_t Module::GetSymbolByNid(const char* nid) {
       return GetAddressNptr<uintptr_t>(s->st_value);
   }
 
+  return 0;
+}
+
+uintptr_t Module::FindDynamicExport(const char* name) {
+  if (!name || !*name) return 0;
+  char encoded[12]{};
+  runtime::nid::Encode(name, reinterpret_cast<u8*>(encoded));
+  const size_t length = std::strlen(name);
+  const char* plain_hook = !std::strcmp(name, "BaOKcng8g88") ? "module_start" :
+                           !std::strcmp(name, "KpDMrPHvt3Q") ? "module_stop" : nullptr;
+  // Prefer an exact ELF export; hashing a literal Unity callback name first
+  // used to miss modules that expose ordinary, unencoded ELF names.
+  for (int pass = 0; pass != 2; ++pass) {
+    for (u32 i = 0; i < num_symbols_; ++i) {
+      const auto& symbol = symbols_[i];
+      const auto binding = ELF64_ST_BIND(symbol.st_info);
+      const auto visibility = symbol.st_other & 3;
+      if (!symbol.st_shndx || symbol.st_name >= strtab_.size ||
+          (binding != STB_GLOBAL && binding != STB_WEAK) ||
+          (visibility != 0 && visibility != 3)) continue;
+      const char* exported = &strtab_.ptr[symbol.st_name];
+      const bool match = pass == 0 ? !std::strcmp(exported, name) :
+          (!std::strncmp(exported, encoded, 11) && (exported[11] == '#' || !exported[11])) ||
+          (length == 11 && !std::strncmp(exported, name, 11) &&
+           (exported[11] == '#' || !exported[11])) ||
+          (plain_hook && !std::strcmp(exported, plain_hook));
+      if (match) {
+        // SHN_ABS exports already contain their absolute value. Defined
+        // symbols at image offset zero are valid, unlike SHN_UNDEF imports.
+        return symbol.st_shndx == 0xfff1 ? symbol.st_value :
+            GetAddressNptr<uintptr_t>(symbol.st_value);
+      }
+    }
+  }
   return 0;
 }
 

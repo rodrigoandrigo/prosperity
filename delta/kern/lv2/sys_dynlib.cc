@@ -34,6 +34,9 @@
 #include "kern/lv2/sys_mem.h"
 #include "options/options.h"
 #include "runtime/nid.h"
+#if defined(DELTA_UWP)
+#include "uwp/memory_win.h"
+#endif
 
 namespace {
 DELTA_OPTION(const char*, kVoInitOff, "DELTA_VO_INIT_OFF", nullptr);
@@ -135,37 +138,54 @@ int PS4ABI sys_dynlib_get_info_ex(u32 handle,
 }
 
 int PS4ABI sys_dynlib_dlsym(u32 handle, const char* sym_name, void** sym) {
-  auto mod = Process::GetActive()->GetModule(handle);
-  if (!mod)
-    return -1;
-
-  char nameenc[12]{};
-  runtime::nid::Encode(sym_name, reinterpret_cast<u8*>(&nameenc));
+  if (!sym || !sym_name) return -SysError::eFAULT;
+  void* result = nullptr;
+#if defined(DELTA_UWP)
+  if (!uwp::WriteMemory(sym, &result, sizeof(result))) return -SysError::eFAULT;
+  base::String checked_name;
+  for (size_t i = 0; i != 4096; ++i) {
+    char byte;
+    if (!uwp::ReadMemory(&byte, sym_name + i, 1)) return -SysError::eFAULT;
+    if (!byte) break;
+    checked_name += byte;
+    if (i == 4095) return -SysError::eINVAL;
+  }
+  sym_name = checked_name.c_str();
+#else
+  *sym = nullptr;
+#endif
+  if (!*sym_name) return -SysError::eINVAL;
+  auto* process = Process::GetActive();
+  if (!process) return -SysError::eSRCH;
+  auto mod = process->GetModule(handle);
+  if (!mod) return -SysError::eSRCH;
 
   auto& mod_name = mod->GetInfo().name;
 
-  // dlsym resolves an EXPORT of the target module by its NID. ResolveObfSymbol
-  // is for imports (it decodes "#libid#modid"); here we match the 11-char NID
-  // directly against the module's export table.
-  uintptr_t addr_out = mod->GetSymbolByNid(nameenc);
-
-  // Callers may pass an already-encoded 11-char NID (e.g. the SDK module-entry
-  // symbol "BaOKcng8g88") instead of a plain name. nid::Encode() would hash the
-  // NID string itself and never match, so also try matching it verbatim.
-  if (!addr_out && std::strlen(sym_name) == 11)
-    addr_out = mod->GetSymbolByNid(sym_name);
+  uintptr_t addr_out = mod->FindDynamicExport(sym_name);
 
   if (!addr_out) {
-    BASE_LOGI("dlsym", "{}!{} -> UNRESOLVED", mod_name.c_str(), sym_name);
-    *sym = nullptr;
-    return -1;
+    bool optional = false;
+    for (const char* probe : {"module_start", "module_stop", "BaOKcng8g88",
+         "KpDMrPHvt3Q", "UnityGetAudioEffectDefinitions", "UnityPluginLoad",
+         "UnityPluginUnload", "UnityRenderEvent", "UnitySetEventQueue",
+         "UnitySetGraphicsDevice"})
+      if (!std::strcmp(sym_name, probe)) { optional = true; break; }
+    BASE_LOGI("dlsym", "{}!{} -> {}", mod_name.c_str(), sym_name,
+              optional ? "OPTIONAL_ABSENT (not exported)" : "UNRESOLVED");
+    return -SysError::eSRCH;
   }
 
   BASE_LOGI("dlsym", "{}!{} -> {:p} (+{:#x})", mod_name.c_str(), sym_name,
             reinterpret_cast<void*>(addr_out),
             addr_out - reinterpret_cast<uintptr_t>(mod->GetInfo().base));
 
-  *sym = reinterpret_cast<void*>(addr_out);
+  result = reinterpret_cast<void*>(addr_out);
+#if defined(DELTA_UWP)
+  if (!uwp::WriteMemory(sym, &result, sizeof(result))) return -SysError::eFAULT;
+#else
+  *sym = result;
+#endif
 
   return 0;
 }
@@ -203,9 +223,19 @@ int PS4ABI sys_dynlib_get_proc_param(void** data, size_t* size) {
 
     *data = reinterpret_cast<void*>(info.proc_param);
     *size = info.proc_param_size;
-    if (kProcparamTrace)
+    if (kProcparamTrace) {
       BASE_LOGI("procparam", "get_proc_param -> data={:p} size={:#x}", *data,
                 *size);
+      const auto* q = reinterpret_cast<const u64*>(info.proc_param);
+      for (u32 i = 0; q && i < info.proc_param_size / 8; i++)
+        BASE_LOGI("procparam", "  +{:#04x} {:#018x}", i * 8, q[i]);
+      if (q && info.proc_param_size >= 0x48 && q[8]) {
+        const auto* mp = reinterpret_cast<const u64*>(q[8]);
+        for (u32 i = 0; i < mp[0] / 8 && i < 8; i++)
+          BASE_LOGI("procparam", "  mem +{:#04x} {:#018x} -> {:#x}", i * 8,
+                    mp[i], i && mp[i] ? *reinterpret_cast<const u64*>(mp[i]) : 0);
+      }
+    }
     return 0;
   }
 
@@ -288,12 +318,10 @@ int PS4ABI sys_dynlib_load_prx(const char* path, u64 flags, int* p_handle) {
   if (std::getenv("DELTA_LOADPRX_STACK"))
     GuestStackTrace("load_prx", 10);
 
-  // kSkipNotFound: libkernel PRELOADS these and strictly verifies they started,
-  // aborting (0x80020064) on a load we can't start (module_start unresolved,
-  // e.g. libSceNet faults on a __thread errno with no DTV TLS). Report genuine
-  // not-found so the preloader skips them.
-  static const char* kSkipNotFound[] = {"libSceSsl2", "libSceHttp2",
-                                        "libSceNpManager", "libSceNpWebApi2"};
+  // Keep the remaining unsupported PS4 initializers isolated. NpManager and
+  // Ssl2 must go through normal lookup, relocation and guest initialization:
+  // their files are present, so reporting ENOENT here hid real modules.
+  static const char* kSkipNotFound[] = {"libSceHttp2", "libSceNpWebApi2"};
   // The skip list is PS4-only: on PS5 the net stack is up and these DT_INITs
   // run fine (Demon's Souls' Crossgen init asserts 0x0112 load-start succeeds,
   // chaining libSceHttp2/NpManager/NpWebApi2; libSceSsl2 has no PS5 module,

@@ -75,6 +75,8 @@ class Process {
   Platform plat_ = Platform::kPs4;
   u32 sdk_version_ = 0;
   ModuleList modules_;
+  struct ModuleAlias { base::String name; ModulePtr module; };
+  base::Vector<ModuleAlias> module_aliases_;
   ObjectTable objects_;
   u32 handle_counter_ = 1;
   u16 tls_counter_ = 1;

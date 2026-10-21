@@ -7,6 +7,7 @@
  */
 
 #include "main/launcher.h"
+#include "main/memory_report.h"
 #if defined(DELTA_UWP)
 #include "embedding/host.h"
 #endif
@@ -344,6 +345,7 @@ void Launcher::Boot(const base::String& game_path) {
   proc_->SetSdkVersion(title.sdk_version);
   if (!argv.empty())
     proc_->SetArgs(argv);
+  cli::StartMemoryReport(title.is_ps5);
   if (!guest::SpawnThread("guest-main",
                           [this, main_module = base::move(title.main_module),
                            mounted = title.mounted] {
@@ -381,6 +383,7 @@ void Launcher::Stop() {
   proc_ = {};
   guest::ResetCodeRanges();
   const auto released = host_memory::EndMemorySession();
+  kern::ResetModuleAddressCursor();
   kern::RestoreGuestVaSpace();
   options::EndGameSession();
   host::ResetGuest();

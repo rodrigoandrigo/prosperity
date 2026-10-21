@@ -49,8 +49,8 @@ bool LiveTargetOfSize(u64 base, u32 w, u32 h) {
   if (rt != g_rts.end()) {
     if (rt->second.w == w && rt->second.h == h)
       return true;
-    const auto v = g_rt_variants.find(base);
-    if (v != g_rt_variants.end())
+    const auto v = g_targets.rt_variants.find(base);
+    if (v != g_targets.rt_variants.end())
       for (const RTarget& t : v->second)
         if (t.w == w && t.h == h)
           return true;
@@ -143,10 +143,7 @@ bool PlanAliasedCopy(const CsAliasedImage& img,
   return false;
 }
 
-bool g_cs_failed = false;
 
-base::Vector<BridgeFloatImage> g_bridge_float_images;
-u64 g_in_frame_bridge_n = 0;
 
 bool BlitsBetween(rhi::Format a, rhi::Format b) {
   static base::HashMap<u64, bool> known;
@@ -160,10 +157,10 @@ bool BlitsBetween(rhi::Format a, rhi::Format b) {
 }
 
 rhi::Texture* GetBridgeFloatImage(u32 w, u32 h) {
-  for (const BridgeFloatImage& b : g_bridge_float_images)
+  for (const BridgeFloatImage& b : g_cs.bridge_float_images)
     if (b.w == w && b.h == h)
       return b.texture;
-  if (g_bridge_float_images.size() >= 8)
+  if (g_cs.bridge_float_images.size() >= 8)
     return nullptr;
   rhi::TextureDesc desc;
   desc.format = rhi::Format::kRGBA32Float;
@@ -176,7 +173,7 @@ rhi::Texture* GetBridgeFloatImage(u32 w, u32 h) {
     return nullptr;
   b.w = w;
   b.h = h;
-  g_bridge_float_images.push_back(b);
+  g_cs.bridge_float_images.push_back(b);
   return b.texture;
 }
 
@@ -262,7 +259,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
       return false;
   }
   EndRegion();
-  rhi::CommandList* const c = g_frame.recording ? g_frame.list : g_cs_list;
+  rhi::CommandList* const c = g_frame.recording ? g_frame.list : g_cs.list;
   c->Barrier(kAccessAll, kAccessCopyRW);
   constexpr rhi::TextureState kSrc = rhi::TextureState::kCopySrc;
   AliasedImageBarrier(c, img, t.layout, kSrc);
@@ -316,7 +313,7 @@ bool RecordRtStageInFrame(const InFrameTarget& t,
   AliasedImageBarrier(c, img, kSrc, t.layout);
   c->Barrier(rhi::kAccessCopyWrite, kAccessAll);
   e.frame_ref = g_frame.num;
-  g_in_frame_bridge_n++;
+  g_cs_stats.in_frame_bridge_n++;
   return CsSplitFrameChunk();
 }
 
@@ -364,7 +361,7 @@ bool RecordRtUploadInFrame(const InFrameTarget& t,
       return false;
   }
   EndRegion();
-  rhi::CommandList* const c = g_frame.recording ? g_frame.list : g_cs_list;
+  rhi::CommandList* const c = g_frame.recording ? g_frame.list : g_cs.list;
   c->Barrier(kAccessAll, kAccessComputeRW | kAccessCopyRW);
   const u64 packed_bytes = (packed.size + 3) & ~u64(3);
   if (narrow && e.truth)
@@ -410,8 +407,8 @@ bool RecordRtUploadInFrame(const InFrameTarget& t,
   e.rt_seq = e.write_seq;
   e.frame_ref = g_frame.num;
   if (e.pending_batch && g_frame.recording)
-    g_cs_chunk_needs_batch = true;
-  g_in_frame_bridge_n++;
+    g_cs.chunk_needs_batch = true;
+  g_cs_stats.in_frame_bridge_n++;
   return true;
 }
 
@@ -480,7 +477,6 @@ bool StageCsRangeFromRtInFrame(const ComputeInfo::Res& res, CsRange& e) {
   return !why;
 }
 
-base::HashSet<u64> g_rt_unbridgeable;
 u64 RtShapeKey(const ComputeInfo::Res& res) {
   return res.base ^ (u64{res.width} << 40) ^ (u64{res.height} << 20) ^
          res.layers;

@@ -329,8 +329,13 @@ struct Translator {
     return r;
   }
 
+  // AcquireRelease | WorkgroupMemory, plus Uniform and Image memory when a
+  // split wave orders guest memory as well as LDS.
+  static constexpr u32 kBarrierLdsOnly = 0x108, kBarrierWithMemory = 0x948;
+  u32 barrier_semantics = kBarrierLdsOnly;
   void Barrier() {
-    m.EmitVoid(spv::Op::OpControlBarrier, {U32(2), U32(2), U32(0x108)});
+    m.EmitVoid(spv::Op::OpControlBarrier,
+               {U32(2), U32(2), U32(barrier_semantics)});
   }
 
   void RequireSubgroup(spv::Capability extra) {
@@ -866,6 +871,7 @@ struct StageContext {
   Id direct_vertex_index = 0;
   base::HashSet<u32> cs_runtime_images;
   base::HashSet<u32> cs_native;
+  base::HashSet<u32> cs_written;
 
   base::HashSet<u32> pervertex_attrs;
   base::HashMap<u32, Id> pervertex_vars;

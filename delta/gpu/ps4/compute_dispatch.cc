@@ -143,8 +143,12 @@ ResourceRange ResolveImageResource(u64 cs_addr,
   }
   out.base = t.base;
   out.guest_size = layout.size;
+  // The shader reads these packed straight from guest memory (see
+  // EmitCsMimgStaged), so there is nothing to widen.
+  const bool packed = !res.written && out.elem_bytes < 4 &&
+                      !((descriptor[3] >> 16) & 0xF);
   out.image_staging = !gcn::TilingIsLinear(t.tiling_idx) ||
-                      out.elem_bytes != out.stage_elem_bytes;
+                      (out.elem_bytes != out.stage_elem_bytes && !packed);
   if (!out.image_staging) {
     out.size = out.guest_size;
     return out;
@@ -334,6 +338,29 @@ bool RunRepeatFillKernelAsFill(render::Renderer& renderer,
   return true;
 }
 
+namespace {
+
+// Bindings whose guest memory one lane may write while another reads it.
+u64 SharedBindings(const render::ComputeInfo& ci) {
+  u64 mask = 0;
+  for (u32 w = 0; w < ci.num_res; w++) {
+    const render::ComputeInfo::Res& writer = ci.res[w];
+    if (!writer.written || writer.binding >= 64)
+      continue;
+    for (u32 r = 0; r < ci.num_res; r++) {
+      const render::ComputeInfo::Res& reader = ci.res[r];
+      if (!reader.read || reader.zero_fill || reader.binding >= 64 ||
+          reader.base >= writer.base + writer.guest_size ||
+          writer.base >= reader.base + reader.guest_size)
+        continue;
+      mask |= (1ull << writer.binding) | (1ull << reader.binding);
+    }
+  }
+  return mask;
+}
+
+}  // namespace
+
 void PrefetchComputeDispatch(const Regs& regs) {
   const ComputeShaderState state = ComputeStateOf(regs);
   if (!kNoCs && IsGuestAddress(state.cs_addr) && state.thread_x &&
@@ -395,6 +422,7 @@ void DispatchCompute(render::Renderer& renderer,
   const u32* user_data = regs.At(mmCOMPUTE_USER_DATA_0);
   const auto cs_program = gcn::CachedProgram(cs_addr, 4096);
   const gcn::RecompiledCs* module = &GetComputeShader(shader);
+  ComputeShaderState chosen = shader;
   base::Vector<gcn::TImage> images;
   u64 native = 0;
   if (kCsNativeImages && module->ok && module->native_candidates &&
@@ -424,6 +452,7 @@ void DispatchCompute(render::Renderer& renderer,
       if (usable) {
         module = &candidate;
         native = native_shader.native_mask;
+        chosen = native_shader;
       }
     }
   }
@@ -550,6 +579,14 @@ void DispatchCompute(render::Renderer& renderer,
     out.dfmt = range.image.dfmt;
     out.nfmt = range.image.nfmt;
     out.pow2_pad = range.image.pow2_pad;
+  }
+  if (rc.orders_shared_memory) {
+    chosen.shared_mask = SharedBindings(ci);
+    if (chosen.shared_mask) {
+      const gcn::RecompiledCs& ordered = GetComputeShader(chosen);
+      if (ordered.ok && ordered.resources.size() == rc.resources.size())
+        ci.recomp = &ordered;
+    }
   }
   ci.gds_binding = rc.gds_binding;
   if (!ci.num_res)

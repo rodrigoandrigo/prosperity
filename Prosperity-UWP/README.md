@@ -1,16 +1,20 @@
 # Prosperity-UWP
 
+## Descrição do projeto
+
 Prosperity-UWP é a interface UWP do emulador Prosperity para Windows e Xbox. O aplicativo utiliza um frontend em ImGui e carrega o núcleo de emulação por meio de `prosperity.dll`.
 
 O projeto reúne renderização Direct3D, áudio XAudio2, controles por Windows.Gaming.Input e acesso a arquivos selecionados pelos seletores nativos do sistema. A biblioteca permite adicionar e remover jogos, configurar o emulador e importar módulos de PS4 e PS5 a partir de arquivos ZIP ou RAR.
 
 As pastas `modules/ps4` e `modules/ps5` são criadas no armazenamento local do aplicativo durante a inicialização. Os registros de execução e inicialização são gravados em `prosperity.log` e `startup.log` nesse mesmo armazenamento.
 
+O build é dividido em duas etapas: a compilação do núcleo como DLL pelo ambiente MSYS2 UCRT64 e a compilação do aplicativo UWP pelo MSBuild. O projeto UWP inclui as DLLs de runtime no pacote final.
+
 ## Compilação
 
 ### Requisitos
 
-- Visual Studio 2026 com ferramentas C++ para UWP, suporte C++/CX e MSBuild.
+- Visual Studio 2026 com ferramentas C++ para UWP, suporte C++/CX, toolset v145 e MSBuild.
 - Windows SDK 10.0.26100.0.
 - MSYS2 em `C:\msys64`, com o ambiente UCRT64, Clang, CMake, Ninja, Python e Git.
 - Código-fonte do SDL3 UWP em `C:\Users\rodri\Dev1\Projetos\SDL3-uwp`.
@@ -76,3 +80,16 @@ Prosperity-UWP/AppPackages/Prosperity-UWP/
 ```
 
 Também é possível abrir `Prosperity-UWP.vcxproj` no Visual Studio, selecionar **Release | x64** e compilar o aplicativo após preparar a DLL.
+
+### 4. Verificar a assinatura do pacote
+
+O comando abaixo identifica o pacote pela versão definida no manifesto e verifica sua assinatura:
+
+```powershell
+$manifest = [xml](Get-Content .\Prosperity-UWP\Package.appxmanifest -Raw)
+$version = $manifest.Package.Identity.Version
+$package = ".\Prosperity-UWP\AppPackages\Prosperity-UWP\Prosperity-UWP_${version}_Test\Prosperity-UWP_${version}_x64.msixbundle"
+$signtool = 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
+
+& $signtool verify /pa $package
+```

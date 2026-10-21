@@ -21,15 +21,85 @@
 #endif
 
 #include "kern/lv2/error_table.h"
+#include "base/logging.h"
+#if defined(DELTA_UWP)
+#include "io/replace_win.h"
+#endif
 
 namespace kern::save_storage {
 namespace {
 std::mutex g_mutex;
 std::map<io::File*, std::filesystem::path> g_open_files;
+std::filesystem::path Canonical(const char* path, std::error_code& error,
+                                bool weak = false) {
+#if defined(DELTA_UWP)
+  // MinGW's canonical() opens paths through desktop CRT APIs. Those can fail
+  // in AppContainer even when FromApp can open the exact same directory.
+  auto existing = std::filesystem::u8path(path);
+  std::filesystem::path suffix;
+  CREATEFILE2_EXTENDED_PARAMETERS parameters{};
+  parameters.dwSize = sizeof(parameters);
+  parameters.dwFileFlags = FILE_FLAG_BACKUP_SEMANTICS;
+  HANDLE handle;
+  for (;;) {
+    handle = CreateFile2FromAppW(existing.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        OPEN_EXISTING, &parameters);
+    if (handle != INVALID_HANDLE_VALUE) break;
+    const DWORD code = GetLastError();
+    const auto parent = existing.parent_path();
+    if (!weak || (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) ||
+        parent.empty() || parent == existing) {
+      error = std::error_code(code, std::system_category());
+      return {};
+    }
+    suffix = existing.filename() / suffix;
+    existing = parent;
+  }
+  const DWORD length = GetFinalPathNameByHandleW(handle, nullptr, 0,
+                                                FILE_NAME_NORMALIZED);
+  if (!length) {
+    const DWORD code = GetLastError();
+    CloseHandle(handle);
+    error = std::error_code(code, std::system_category());
+    return {};
+  }
+  std::wstring resolved(length, L'\0');
+  const DWORD written = GetFinalPathNameByHandleW(handle, resolved.data(), length,
+                                                 FILE_NAME_NORMALIZED);
+  const DWORD code = GetLastError();
+  CloseHandle(handle);
+  if (!written || written >= length) {
+    error = std::error_code(written ? ERROR_INSUFFICIENT_BUFFER : code,
+                            std::system_category());
+    return {};
+  }
+  resolved.resize(written);
+  error.clear();
+  const auto canonical = std::filesystem::path(resolved);
+  return suffix.empty() ? canonical : (canonical / suffix).lexically_normal();
+#else
+  return weak ? std::filesystem::weakly_canonical(path, error) :
+                std::filesystem::canonical(path, error);
+#endif
+}
 struct FileInfo {
   std::pair<u64, u64> identity;
   u64 size, links;
 };
+i32 IoFailure(const char* operation, const std::filesystem::path& path,
+              const std::error_code& error = {}) {
+  const int saved_errno = errno;
+#ifdef _WIN32
+  const auto native_error = GetLastError();
+#else
+  const auto native_error = 0;
+#endif
+  BASE_LOGE("savedata", "{} failed: path={} error={} errno={} win32={}",
+            operation, path.string().c_str(), error.value(), saved_errno,
+            native_error);
+  return -static_cast<i32>(SysError::eIO);
+}
 bool StatFile(FILE* stream, FileInfo& info) {
 #ifdef _WIN32
   BY_HANDLE_FILE_INFORMATION status;
@@ -72,7 +142,7 @@ bool Track(io::File& file, const base::String& root) {
   if (root.empty())
     return true;
   std::error_code error;
-  const auto canonical = std::filesystem::canonical(root.c_str(), error);
+  const auto canonical = Canonical(root.c_str(), error);
   FileInfo info;
   if (error || !StatFile(static_cast<FILE*>(file.GetNativeHandle()), info))
     return false;
@@ -92,9 +162,9 @@ i32 InfoUnlocked(const base::String& host, u64& total, u64& free) {
         read != 8 || std::fgetc(file) != EOF || std::ferror(file);
     std::fclose(file);
     if (failed || total < 96)
-      return -static_cast<i32>(SysError::eIO);
+      return IoFailure("read quota", quota.c_str());
   } else if (errno != ENOENT) {
-    return -static_cast<i32>(SysError::eIO);
+    return IoFailure("open quota", quota.c_str());
   }
   u64 used = 0;
   std::set<std::pair<u64, u64>> counted;
@@ -105,27 +175,27 @@ i32 InfoUnlocked(const base::String& host, u64& total, u64& free) {
   std::error_code error;
   std::filesystem::recursive_directory_iterator files(host.c_str(), error), end;
   if (error)
-    return -static_cast<i32>(SysError::eIO);
+    return IoFailure("enumerate save", host.c_str(), error);
   for (; files != end; files.increment(error)) {
     if (error)
-      return -static_cast<i32>(SysError::eIO);
+      return IoFailure("advance save enumeration", host.c_str(), error);
     const auto status = files->symlink_status(error);
     if (error)
-      return -static_cast<i32>(SysError::eIO);
+      return IoFailure("query save entry", files->path(), error);
     if (std::filesystem::is_regular_file(status) &&
         files->path() != std::filesystem::path(quota.c_str()) &&
         files->path() != std::filesystem::path((quota + ".tmp").c_str())) {
       FileInfo info;
       if (!StatFile(files->path(), info))
-        return -static_cast<i32>(SysError::eIO);
+        return IoFailure("stat save entry", files->path());
       account(info);
     }
   }
   if (error)
-    return -static_cast<i32>(SysError::eIO);
-  const auto canonical = std::filesystem::canonical(host.c_str(), error);
+    return IoFailure("finish save enumeration", host.c_str(), error);
+  const auto canonical = Canonical(host.c_str(), error);
   if (error)
-    return -static_cast<i32>(SysError::eIO);
+    return IoFailure("canonical save root", host.c_str(), error);
   for (const auto& [file, root] : g_open_files) {
     if (root != canonical)
       continue;
@@ -176,10 +246,10 @@ bool Confined(const base::String& root, const base::String& path) {
   if (root.empty())
     return true;
   std::error_code error;
-  const auto base = std::filesystem::canonical(root.c_str(), error);
+  const auto base = Canonical(root.c_str(), error);
   if (error)
     return false;
-  const auto target = std::filesystem::weakly_canonical(path.c_str(), error);
+  const auto target = Canonical(path.c_str(), error, true);
   if (error)
     return false;
   auto element = target.begin();
@@ -330,7 +400,8 @@ i32 Replace(const base::String& root,
             const void* data,
             size_t size) {
   std::lock_guard lock(g_mutex);
-  if (path != root + "/.sce_quota.bin") {
+  if (std::filesystem::path(path.c_str()) !=
+      std::filesystem::path(root.c_str()) / ".sce_quota.bin") {
     u64 limit;
     if (const auto result = ReplaceLimit(root, path, limit))
       return result;
@@ -349,7 +420,14 @@ i32 Replace(const base::String& root,
     return -static_cast<i32>(SysError::eIO);
   }
   std::error_code error;
+#if defined(DELTA_UWP)
+  const auto source = std::filesystem::u8path(temporary.c_str());
+  const auto destination = std::filesystem::u8path(path.c_str());
+  if (!io::ReplaceFromApp(source.c_str(), destination.c_str()))
+    error = std::error_code(GetLastError(), std::system_category());
+#else
   std::filesystem::rename(temporary.c_str(), path.c_str(), error);
+#endif
   if (error) {
     std::error_code ignored;
     std::filesystem::remove(temporary.c_str(), ignored);
@@ -381,7 +459,7 @@ i32 RemoveSave(const base::String& root) {
     return -static_cast<i32>(SysError::eIO);
   if (!std::filesystem::is_directory(status))
     return -static_cast<i32>(SysError::eINVAL);
-  const auto canonical = std::filesystem::canonical(root.c_str(), error);
+  const auto canonical = Canonical(root.c_str(), error);
   if (error)
     return -static_cast<i32>(SysError::eIO);
   for (const auto& [file, host] : g_open_files)
@@ -407,7 +485,7 @@ i32 RemoveSave(const base::String& root) {
       return -static_cast<i32>(SysError::eACCES);
     error.clear();
     const auto backup_root =
-        std::filesystem::canonical(backup.c_str(), error);
+        Canonical(backup.c_str(), error);
     if (error)
       return -static_cast<i32>(SysError::eIO);
     for (const auto& [file, host] : g_open_files)
@@ -473,11 +551,11 @@ i32 CopySave(const base::String& source, const base::String& destination) {
     return result;
   std::error_code error;
   const auto canonical =
-      std::filesystem::weakly_canonical(destination.c_str(), error);
+      Canonical(destination.c_str(), error, true);
   if (error)
     return StorageError(error);
   const auto canonical_source =
-      std::filesystem::canonical(source.c_str(), error);
+      Canonical(source.c_str(), error);
   if (error)
     return StorageError(error);
   for (const auto& [file, host] : g_open_files)

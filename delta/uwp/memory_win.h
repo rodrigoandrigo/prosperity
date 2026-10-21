@@ -15,6 +15,7 @@ bool WriteMemory(void* destination, const void* source, size_t size);
 bool InSafeMemoryCopy();
 bool ConfigureMemory(const prosperity_memory_policy&);
 prosperity_memory_info MemoryInfo();
+bool QueryApplicationMemory(uint64_t& usage, uint64_t& limit);
 void ClearMemoryPolicy();
 const char* MemoryFaultError();
 }

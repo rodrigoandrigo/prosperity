@@ -775,7 +775,7 @@ bool ReportRtContents(FrameSlot& owner) {
   base::Vector<base::Pair<u64, DepthTarget*>> depth_list;
   for (auto& kv : g_depths)
     depth_list.emplace_back(kv.first, &kv.second);
-  for (auto& kv : g_depth_variants)
+  for (auto& kv : g_targets.depth_variants)
     for (DepthTarget& v : kv.second)
       depth_list.emplace_back(kv.first, &v);
   if (!kGpuDbStat)
@@ -855,7 +855,7 @@ bool ReportRtContents(FrameSlot& owner) {
 void StampSubmittedLayouts() {
   for (auto& rt_entry : g_rts)
     rt_entry.second.submitted_layout = rt_entry.second.layout;
-  for (auto& parked : g_rt_variants)
+  for (auto& parked : g_targets.rt_variants)
     for (RTarget& v : parked.second)
       v.submitted_layout = v.layout;
   for (auto& depth_entry : g_depths) {
@@ -863,7 +863,7 @@ void StampSubmittedLayouts() {
     depth_entry.second.submitted_stencil_layout =
         depth_entry.second.stencil_layout;
   }
-  for (auto& parked : g_depth_variants)
+  for (auto& parked : g_targets.depth_variants)
     for (DepthTarget& v : parked.second) {
       v.submitted_layout = v.layout;
       v.submitted_stencil_layout = v.stencil_layout;
@@ -1095,7 +1095,7 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
   g_frame.recording = false;
   phases.Mark(2);
   ReportFps();
-  ScopeNs end_timer(&g_ns_end);
+  ScopeNs end_timer(&g_stats.ns_end);
   EndRegion();
 
   u64 present_base =
@@ -1206,8 +1206,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     cur.fmt = read_fmt;
   }
   {
-    ScopeNs submit_timer(&g_ns_submit);
-    ScopeNs frame_submit_timer(&g_fr_submit);
+    ScopeNs submit_timer(&g_stats.ns_submit);
+    ScopeNs frame_submit_timer(&g_frame_ns.submit);
     g_frame.list->ProfileEnd();
     bindless::FrameEnd(g_frame.list, g_frame.slot_idx);
     if (cur.timestamps)
@@ -1258,17 +1258,17 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
       return;
     }
     u64 dt = NowNs() - tr0;
-    g_ns_readback += dt;
-    g_fr_wait += dt;
+    g_stats.ns_readback += dt;
+    g_frame_ns.wait += dt;
     if (fin.timestamps) {
       u64 timestamps[2] = {};
       if (Device().ReadTimestamps(fin.timestamps, 0, 2, timestamps)) {
         const u32 bits = Device().caps().timestamp_bits;
         const u64 mask = bits >= 64 ? UINT64_MAX : (u64{1} << bits) - 1;
         const u64 ticks = (timestamps[1] - timestamps[0]) & mask;
-        g_ns_gpu_exec += static_cast<u64>(static_cast<double>(ticks) *
-                                          Device().caps().timestamp_period_ns);
-        g_gpu_exec_samples++;
+        g_stats.ns_gpu_exec += static_cast<u64>(
+            static_cast<double>(ticks) * Device().caps().timestamp_period_ns);
+        g_stats.gpu_exec_samples++;
       }
     }
     phases.Mark(4);
@@ -1284,8 +1284,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     ReportDeclines();
   if (!waited || !fin.presentable || fin.shared_frame) {
     if (waited && fin.shared_frame && fin.present_to_window) {
-      ScopeNs present_timer(&g_ns_present);
-      ScopeNs frame_present_timer(&g_fr_present);
+      ScopeNs present_timer(&g_stats.ns_present);
+      ScopeNs frame_present_timer(&g_frame_ns.present);
       renderer.state->presenter.PresentShared(
           fin.shared, fin.shared_id, fin.shared_fd, fin.shared_bytes, fin.w,
           fin.h,
@@ -1462,8 +1462,8 @@ void EndFrame(Renderer& renderer, u64 scanout_base) {
     BASE_LOGI("overlay", "wrote {}", p);
   }
   if (fin.present_to_window) {
-    ScopeNs present_timer(&g_ns_present);
-    ScopeNs frame_present_timer(&g_fr_present);
+    ScopeNs present_timer(&g_stats.ns_present);
+    ScopeNs frame_present_timer(&g_frame_ns.present);
     if (kSyncPresent) {
       if (host::Ensure("prosperity", fin.w, fin.h) && host::PumpEvents())
         host::Present(pixels, fin.w, fin.h, fin.w * 4, pixel_fmt);

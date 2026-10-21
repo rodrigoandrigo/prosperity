@@ -42,6 +42,9 @@ inline bool InModuleRegion(u64 address) {
   return address >= kModuleRegionBase && address < kModuleRegionEnd;
 }
 
+// Call after guest workers have joined and their address space was released.
+void ResetModuleAddressCursor();
+
 struct ModuleSeg {
   u8* addr;
   u32 size;
@@ -116,6 +119,7 @@ class Module {
   uintptr_t GetExport(u64 nid);
   uintptr_t GetSymbolFullName(const char* name);
   uintptr_t GetSymbol2(const char* name);
+  uintptr_t FindDynamicExport(const char* name);
   // Resolve an exported symbol by its 11-char NID prefix (export strtab names
   // are "<nid>#<libid>#<modid>"; dlsym only knows the NID, not the inner ids).
   uintptr_t GetSymbolByNid(const char* nid);
@@ -149,6 +153,9 @@ class Module {
   void Retain() { references_.fetch_add(1); }
 
  private:
+  // A firmware image can share DT_SCE_MODULEINFO with a different module
+  // (for example NpSns and NpManager). Keep the requested identity separately.
+  base::String load_name_;
   base::Atomic<u32> references_{1};
   ModuleInfo info_{};
 

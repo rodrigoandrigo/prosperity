@@ -54,49 +54,15 @@ bool CsSyncReporting() {
   return kCsSyncReport && gpu::render::g_frame.num >= kCsSyncFrom;
 }
 
-u64 g_tex_bridge_n = 0, g_tex_bridge_bytes = 0, g_cs_chunk_splits = 0;
-u64 g_buf_bridge_n = 0, g_buf_bridge_bytes = 0, g_buf_bridge_declined = 0;
-u64 g_vtx_bridge_n = 0;
-u64 g_guest_override_n = 0, g_guest_mirror_tiles = 0, g_cs_rt_variants_made = 0;
-u64 g_gds_imported_n = 0, g_guest_misses_n = 0, g_cs_indirect_n = 0;
-u64 g_indirect_staged_n = 0;
-rhi::Buffer* g_indirect_ring = nullptr;
-u64 g_indirect_head = 0, g_indirect_frame_n = 0;
-int g_indirect_frame = -1;
-rhi::Buffer* g_predicate = nullptr;
 u64 g_predicate_offset = 0;
-u64 g_stage_ro_bytes = 0, g_stage_rw_bytes = 0, g_stage_img_bytes = 0;
-u64 g_stage_guest_detile_bytes = 0, g_stage_guest_detile_n = 0;
-u64 g_mirror_wb_bytes = 0, g_mirror_wb_n = 0, g_mirror_own_bytes = 0;
 base::Atomic<u64> g_mirror_resolves{0};
-base::HashSet<u64> g_mirror_cached;
-base::Vector<base::Pair<u64, u64>> g_mirror_stale;
-base::HashSet<u64> g_mirror_hot;
-base::HashSet<u64> g_mirror_was_owned;
-base::Map<u64, u64> g_mirror_wb_union;
 DELTA_OPTION(bool, kMirror, "DELTA_GPU_MIRROR", true);
 DELTA_OPTION(bool, kCsListProf, "DELTA_GPU_LISTPROF", false);
-u64 g_in_hash_ns = 0, g_in_detile_ns = 0, g_in_rt_ns = 0, g_in_copy_ns = 0;
-u64 g_in_hash_n = 0, g_in_rt_n = 0, g_in_wt_skips = 0;
-u64 g_in_hash_bytes = 0, g_wb_hash_bytes = 0, g_wb_hash_ns = 0;
-u64 g_in_overlap_ns = 0, g_in_reshape_ns = 0, g_in_alloc_ns = 0;
-u64 g_in_membuf_ns = 0;
-u64 g_in_overlap_n = 0, g_in_reshape_n = 0, g_in_alloc_n = 0;
-u64 g_truth_stage_bytes = 0, g_truth_import_n = 0, g_truth_detile_n = 0,
-    g_truth_retile_n = 0, g_truth_parent_n = 0, g_truth_fold_n = 0,
-    g_truth_rt_n = 0;
-base::Map<base::String, u64> g_wb_why;
-u64 g_wb_why_bytes = 0;
-u64 g_lazy_kept_n = 0, g_lazy_kept_bytes = 0;
-u64 g_out_rt_submits = 0;
-
-base::HashMap<u64, StageStat> g_stage_stats;
 
 static_assert(ComputeInfo::kMaxResources == gcn::kMaxCsResources);
 
-GdsBuffer g_gds;
-
-base::HashMap<u64, CsPipe> g_cs_pipes;
+CsStats g_cs_stats;
+ComputeState g_cs;
 
 bool SplitVram() {
   const bool split = !Device().caps().unified_memory;
@@ -160,7 +126,6 @@ rhi::Pipeline* CreateCsPipeline(rhi::PipelineLayout* layout,
 }
 
 base::Mutex g_prebuilt_mutex;
-base::HashMap<u64, base::SharedPointer<PrebuiltSlot>> g_prebuilt;
 
 u64 PrebuiltKey(const base::Vector<u32>& spirv,
                 u32 num_res,
@@ -173,8 +138,8 @@ u64 PrebuiltKey(const base::Vector<u32>& spirv,
 
 CsPipe* GetCsPipe(const ComputeInfo& ci) {
   const u64 key = reinterpret_cast<uintptr_t>(ci.recomp);
-  auto it = g_cs_pipes.find(key);
-  if (it != g_cs_pipes.end())
+  auto it = g_cs.pipes.find(key);
+  if (it != g_cs.pipes.end())
     return it->second.num_res == ci.num_res ? &it->second : nullptr;
   CsPipe cp;
   cp.num_res = ci.num_res;
@@ -183,11 +148,11 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
     base::SharedPointer<PrebuiltSlot> slot;
     {
       base::LockGuard<base::Mutex> lock(g_prebuilt_mutex);
-      const auto found = g_prebuilt.find(PrebuiltKey(
+      const auto found = g_cs.prebuilt.find(PrebuiltKey(
           ci.recomp->spirv, ci.num_res, ci.recomp->guest_memory_binding));
-      if (found != g_prebuilt.end()) {
+      if (found != g_cs.prebuilt.end()) {
         slot = found->second;
-        g_prebuilt.erase(found);
+        g_cs.prebuilt.erase(found);
       }
     }
     PrebuiltCs prebuilt;
@@ -201,10 +166,10 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
       cp.set_layout = prebuilt.set_layout;
       cp.layout = prebuilt.layout;
       cp.pipe = prebuilt.pipe;
-      g_ns_pipe_build += NowNs() - started;
-      g_pipe_build_n++;
-      g_cs_pipes[key] = cp;
-      return &g_cs_pipes[key];
+      g_stats.ns_pipe_build += NowNs() - started;
+      g_stats.pipe_build_n++;
+      g_cs.pipes[key] = cp;
+      return &g_cs.pipes[key];
     }
   }
   cp.set_layout =
@@ -222,12 +187,12 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
               ci.recomp->spirv.size());
   const u64 started = NowNs();
   cp.pipe = CreateCsPipeline(cp.layout, ci.recomp->spirv);
-  g_ns_pipe_build += NowNs() - started;
+  g_stats.ns_pipe_build += NowNs() - started;
   if (CsSyncReporting())
     BASE_LOGI("cspipe", "compiled cs={:#x} ms={:.3f}", ci.cs_addr,
               double(NowNs() - started) / 1e6);
 
-  g_pipe_build_n++;
+  g_stats.pipe_build_n++;
   if (!cp.pipe) {
     BASE_LOGI("gpuvk", "compute pipeline failed");
     Device().Destroy(cp.layout);
@@ -240,46 +205,34 @@ CsPipe* GetCsPipe(const ComputeInfo& ci) {
                   (unsigned long long)ci.cs_addr);
     Device().SetName(cp.pipe, name);
   }
-  g_cs_pipes[key] = cp;
-  return &g_cs_pipes[key];
+  g_cs.pipes[key] = cp;
+  return &g_cs.pipes[key];
 }
 
-CsStage g_cs_stage[ComputeInfo::kMaxResources];
-rhi::CommandList* g_cs_list = nullptr;
 
-u64 g_cs_scratch_owner = 0;
-u64 g_cs_scratch_bytes = 0;
 
-base::Vector<rhi::Buffer*> g_cs_frame_retired;
 
 bool CsFrameReferenced(const CsRange& e) {
   return e.frame_ref >= 0 && e.frame_ref + 2 > g_frame.num;
 }
 
-struct CsFreeBuffer {
-  rhi::Buffer* buf = nullptr;
-  u64 cap = 0;
-  bool device_local = false;
-};
-base::Vector<CsFreeBuffer> g_cs_free;
-u64 g_cs_free_bytes = 0, g_cs_recycled_n = 0;
 
 bool EnsureGdsBuffer() {
-  if (g_gds.buf)
+  if (g_cs.gds.buf)
     return true;
-  g_gds.buf = CreateCsBuffer(
+  g_cs.gds.buf = CreateCsBuffer(
       GdsBuffer::kBytes,
       rhi::kBufferStorage | rhi::kBufferCopyDst | rhi::kBufferCopySrc,
       rhi::MemoryKind::kReadback);
-  if (!g_gds.buf)
+  if (!g_cs.gds.buf)
     return false;
-  g_gds.map = g_gds.buf->mapped();
-  if (!g_gds.map) {
-    Device().Destroy(g_gds.buf);
-    g_gds = {};
+  g_cs.gds.map = g_cs.gds.buf->mapped();
+  if (!g_cs.gds.map) {
+    Device().Destroy(g_cs.gds.buf);
+    g_cs.gds = {};
     return false;
   }
-  std::memset(g_gds.map, 0, GdsBuffer::kBytes);
+  std::memset(g_cs.gds.map, 0, GdsBuffer::kBytes);
   return true;
 }
 
@@ -287,25 +240,25 @@ void CsRangeDestroy(CsRange& e);
 
 base::HashMap<u64, CsRange>::iterator EraseCsRange(
     base::HashMap<u64, CsRange>::iterator it) {
-  if (it == g_cs_evict_next)
-    ++g_cs_evict_next;
+  if (it == g_cs.evict_next)
+    ++g_cs.evict_next;
   UnindexCsRange(it->first, it->second.guest_bytes);
   CsRangeDestroy(it->second);
-  return g_cs_ranges.erase(it);
+  return g_cs.ranges.erase(it);
 }
 
 bool CsReleaseMemory(const CsRange& keep) {
   const auto drop_free_list = [] {
-    const bool any = !g_cs_free.empty();
-    for (const CsFreeBuffer& f : g_cs_free)
+    const bool any = !g_cs.free_list.empty();
+    for (const CsFreeBuffer& f : g_cs.free_list)
       Device().Destroy(f.buf);
-    g_cs_free.clear();
-    g_cs_free_bytes = 0;
+    g_cs.free_list.clear();
+    g_cs.free_bytes = 0;
     return any;
   };
   const bool released = drop_free_list();
   u64 evicted = 0;
-  for (auto it = g_cs_ranges.begin(); it != g_cs_ranges.end();) {
+  for (auto it = g_cs.ranges.begin(); it != g_cs.ranges.end();) {
     CsRange& r = it->second;
     if (&r == &keep || r.gpu_dirty || r.pending_batch || CsFrameReferenced(r) ||
         r.last_used_frame + 2 >= g_frame.num) {
@@ -327,7 +280,7 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   if (e.buf && e.cap >= size)
     return true;
   if (CsFrameReferenced(e) || e.pending_batch) {
-    g_cs_frame_retired.push_back(e.buf);
+    g_cs.frame_retired.push_back(e.buf);
     e.frame_ref = -1;
     e.pending_batch = false;
   } else {
@@ -337,20 +290,20 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
   e.device_local = false;
   e.imported = false;
   if (!e.imported)
-    g_cs_range_bytes -= e.cap;
+    g_cs.range_bytes -= e.cap;
   e.cap = 0;
   u64 cap = (size + 0xFFFF) & ~u64(0xFFFF);
-  for (size_t i = g_cs_free.size(); i-- > 0;) {
-    const CsFreeBuffer& f = g_cs_free[i];
+  for (size_t i = g_cs.free_list.size(); i-- > 0;) {
+    const CsFreeBuffer& f = g_cs.free_list[i];
     if (f.cap != cap || f.device_local != static_cast<bool>(kCsVram))
       continue;
     e.buf = f.buf;
     e.device_local = f.device_local;
     e.cap = cap;
-    g_cs_free_bytes -= cap;
-    g_cs_free.erase(g_cs_free.begin() + i);
-    g_cs_range_bytes += cap;
-    g_cs_recycled_n++;
+    g_cs.free_bytes -= cap;
+    g_cs.free_list.erase(g_cs.free_list.begin() + i);
+    g_cs.range_bytes += cap;
+    g_cs_stats.recycled_n++;
     return true;
   }
   u32 usage = rhi::kBufferStorage | rhi::kBufferUniform | rhi::kBufferCopyDst |
@@ -367,16 +320,16 @@ bool CsRangeEnsureBuffer(CsRange& e, u64 size) {
     return false;
   e.device_local = split;
   e.cap = cap;
-  g_cs_range_bytes += cap;
+  g_cs.range_bytes += cap;
   return true;
 }
 
 bool CsRangeRename(CsRange& e, u64 size) {
   if (e.buf)
-    g_cs_frame_retired.push_back(e.buf);
+    g_cs.frame_retired.push_back(e.buf);
   e.frame_ref = -1;
   e.pending_batch = false;
-  g_cs_range_bytes -= e.cap;
+  g_cs.range_bytes -= e.cap;
   e.buf = nullptr;
   e.device_local = false;
   e.cap = 0;
@@ -384,34 +337,34 @@ bool CsRangeRename(CsRange& e, u64 size) {
 }
 
 void CsRangeDestroy(CsRange& e) {
-  base::EraseIf(g_cs_pending, [&e](CsRange* r) { return r == &e; });
+  base::EraseIf(g_cs.pending, [&e](CsRange* r) { return r == &e; });
   if (e.mirror)
-    g_cs_frame_retired.push_back(e.mirror);
+    g_cs.frame_retired.push_back(e.mirror);
   if (!e.imported && !CsFrameReferenced(e) && !e.pending_batch && e.buf &&
-      e.cap && g_cs_free_bytes + e.cap <= (256ull << 20)) {
-    g_cs_free.push_back({e.buf, e.cap, e.device_local});
-    g_cs_free_bytes += e.cap;
-    g_cs_range_bytes -= e.cap;
+      e.cap && g_cs.free_bytes + e.cap <= (256ull << 20)) {
+    g_cs.free_list.push_back({e.buf, e.cap, e.device_local});
+    g_cs.free_bytes += e.cap;
+    g_cs.range_bytes -= e.cap;
     e = CsRange{};
     return;
   }
   if (CsFrameReferenced(e) || e.pending_batch)
-    g_cs_frame_retired.push_back(e.buf);
+    g_cs.frame_retired.push_back(e.buf);
   else
     Device().Destroy(e.buf);
-  g_cs_range_bytes -= e.cap;
+  g_cs.range_bytes -= e.cap;
   e = CsRange{};
 }
 
 bool CsEnsureStage(u32 i, u64 size) {
   GPU_BUGCHECK(i < ComputeInfo::kMaxResources, "stage index %u out of bounds",
                i);
-  CsStage& s = g_cs_stage[i];
+  CsStage& s = g_cs.stage[i];
   if (s.buf && s.cap >= size)
     return true;
   s.map = nullptr;
   if (s.buf)
-    g_cs_frame_retired.push_back(s.buf);
+    g_cs.frame_retired.push_back(s.buf);
   s.buf = nullptr;
   const u64 cap = (size + 0xFFFFF) & ~u64(0xFFFFF);
   const bool vram = kCsVram && SplitVram();
@@ -436,8 +389,8 @@ void ReleaseRetiredCsBuffers() {
       [] { guest::ResetResource(aged); });
   for (rhi::Buffer* buf : aged)
     Device().Destroy(buf);
-  aged = base::move(g_cs_frame_retired);
-  g_cs_frame_retired.clear();
+  aged = base::move(g_cs.frame_retired);
+  g_cs.frame_retired.clear();
 }
 
 }  // namespace gpu::render
@@ -447,75 +400,10 @@ namespace gpu::render::cs {
 const guest::SessionReset g_session_reset([] {
   host_memory::SetWriteFaultHandler(nullptr);
   host_memory::SetHostWriteHook(nullptr);
-  if (g_own)
-    munmap(g_own, kOwnBlocks * sizeof(OwnBlock));
-  g_own = nullptr;
-  g_cs_writeback_gen = g_cs_batch_next_id = 1;
-  guest::ResetResource(g_mirror_cached);
-  guest::ResetResource(g_mirror_stale);
-  guest::ResetResource(g_mirror_hot);
-  guest::ResetResource(g_mirror_was_owned);
-  guest::ResetResource(g_mirror_wb_union);
-  guest::ResetResource(g_wb_why);
-  guest::ResetResource(g_stage_stats);
-  guest::ResetResource(g_gds);
-  guest::ResetResource(g_cs_pipes);
-  guest::ResetResource(g_prebuilt);
-  guest::ResetResource(g_cs_stage);
-  guest::ResetResource(g_cs_list);
-  guest::ResetResource(g_cs_scratch_owner);
-  guest::ResetResource(g_cs_scratch_bytes);
-  guest::ResetResource(g_cs_frame_retired);
-  guest::ResetResource(g_cs_free);
-  guest::ResetResource(g_cs_free_bytes);
-  guest::ResetResource(g_cs_failed);
-  guest::ResetResource(g_bridge_float_images);
-  guest::ResetResource(g_rt_unbridgeable);
-  guest::ResetResource(g_cs_ranges);
-  guest::ResetResource(g_cs_evict_next);
-  guest::ResetResource(g_cs_dirty_stamp);
-  guest::ResetResource(g_cs_pending);
-  guest::ResetResource(g_cs_range_bytes);
-  guest::ResetResource(g_cs_dirty_pages);
-  guest::ResetResource(g_cs_dirty_bases);
-  guest::ResetResource(g_cs_dirty_lo);
-  guest::ResetResource(g_cs_range_blocks);
-  guest::ResetResource(g_tile_tables);
-  guest::ResetResource(g_cs_scratch);
-  guest::ResetResource(g_cs_batch_open);
-  guest::ResetResource(g_cs_batch_count);
-  guest::ResetResource(g_cs_batch_id);
-  guest::ResetResource(g_cs_batch_done);
-  guest::ResetResource(g_pending_guest_writes);
-  guest::ResetResource(g_publish_batch);
-  guest::ResetResource(g_cs_batch_cur);
-  guest::ResetResource(g_cs_batch_log);
-  guest::ResetResource(g_cs_timestamps);
-  guest::ResetResource(g_cs_gpu_times);
-  guest::ResetResource(g_cs_heavy);
-  guest::ResetResource(g_cs_heavy_sampled);
-  guest::ResetResource(g_cs_batch_access);
-  guest::ResetResource(g_cs_batches);
-  guest::ResetResource(g_cs_chunk_needs_batch);
-  guest::ResetResource(g_cs_reader_waits);
-  guest::ResetResource(g_cs_reader_wbs);
-  guest::ResetResource(g_submitted);
-  guest::ResetResource(g_last_submitted_id);
-  guest::ResetResource(g_guest_page_imports);
-  guest::ResetResource(g_labels_deferrable);
-  guest::ResetResource(g_mirror);
-  guest::ResetResource(g_mirror_tried);
-  guest::ResetResource(g_mirror_imports);
-  guest::ResetResource(g_mirror_clean);
-  guest::ResetResource(g_mirror_self);
-  guest::ResetResource(g_own_unsubmitted);
-  guest::ResetResource(g_mirror_writes);
-  guest::ResetResource(g_mirror_seq);
-  guest::ResetResource(g_indirect_ring);
-  guest::ResetResource(g_predicate);
-  guest::ResetResource(g_indirect_head);
-  guest::ResetResource(g_indirect_frame);
-  guest::ResetResource(g_indirect_frame_n);
+  if (g_cs.own)
+    munmap(g_cs.own, kOwnBlocks * sizeof(OwnBlock));
+  guest::ResetResource(g_cs);
+  guest::ResetResource(g_cs_stats);
 });
 
 }  // namespace gpu::render::cs

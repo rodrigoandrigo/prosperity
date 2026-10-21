@@ -110,9 +110,12 @@ bool Process::Create(const base::String& path, bool from_vfs) {
   return true;
 }
 ModulePtr Process::GetModule(base::StringRef name) {
+  for (auto& alias : module_aliases_)
+    if (name == base::StringRef(alias.name)) return alias.module;
   for (auto& mod : modules_) {
     // module name is base::String, compare via c_str.
-    if (name == base::StringRef(mod->GetInfo().name))
+    if (name == base::StringRef(mod->load_name_.empty()
+                                   ? mod->GetInfo().name : mod->load_name_))
       return mod;
   }
   return {nullptr};
@@ -151,14 +154,30 @@ ModulePtr Process::LoadModule(base::StringRef name, const char* requested_path) 
 
   modules_.emplace_back(lib);
 
+  // Dependencies can be appended recursively. Remove this exact placeholder
+  // on failure, rather than leaving a null entry or popping a dependency.
+  struct PendingModule {
+    ModuleList& modules;
+    Module* module;
+    bool loaded = false;
+    ~PendingModule() {
+      if (loaded) return;
+      for (auto it = modules.begin(); it != modules.end(); ++it) {
+        if (it->get() == module) { modules.erase(it); break; }
+      }
+    }
+  } pending{modules_, lib.get()};
+
   base::String sname;
   sname.append(name.data(), name.length());
+  lib->load_name_ = sname;
 
   // Dynamic loads may name application modules outside sce_module. Preserve
   // that VFS path instead of reducing it to a firmware-style basename.
   if (requested_path && requested_path[0] == '/' && vfs::OpenRead(requested_path).Exists()) {
     if (!lib->FromVfs(base::String(requested_path))) return nullptr;
     probe::OnModuleLoaded(*lib, name);
+    pending.loaded = true;
     return lib;
   }
 
@@ -226,14 +245,15 @@ ModulePtr Process::LoadModule(base::StringRef name, const char* requested_path) 
       // Its imports fall through to the badcall stub instead, which is
       // non-fatal.
       LOG_ERROR("unable to load ps5 module {}", sname.c_str());
-      modules_.pop_back();
       return nullptr;
     }
+    pending.loaded = true;
     return lib;
   }
 
   const bool is_packaged_sdk_module =
       name == base::StringRef("libc") || name == base::StringRef("libSceFios2");
+  bool packaged_module_found = false;
   auto load_packaged_module = [&] {
     // Retail applications provide these SDK compatibility modules in
     // /app0/sce_module rather than using the firmware copies. The firmware-
@@ -246,8 +266,10 @@ ModulePtr Process::LoadModule(base::StringRef name, const char* requested_path) 
         vfs_path.append(name.data(), name.length());
         vfs_path += extension;
         if (!vfs::OpenRead(vfs_path.c_str()).Exists()) continue;
+        packaged_module_found = true;
         if (!lib->FromVfs(vfs_path)) return false;
         probe::OnModuleLoaded(*lib, name);
+        pending.loaded = true;
         return true;
       }
     }
@@ -274,21 +296,38 @@ ModulePtr Process::LoadModule(base::StringRef name, const char* requested_path) 
   } else {
     host_path = io::MakeAbsPath(host_rel);
   }
-  if (io::File(host_path, io::FileMode::kRead).IsOpen()) {
+  const bool firmware_module_found = io::File(host_path, io::FileMode::kRead).IsOpen();
+  if (firmware_module_found) {
     if (lib->FromFile(host_path)) {
       if (is_ps4_gnm_driver)
         lib->GetInfo().name = sname;
       probe::OnModuleLoaded(*lib, name);
+      pending.loaded = true;
       return lib;
     }
-  } else {
+  }
+  {
     // The game's own modules live inside the pkg: SDK prx under
     // /app0/sce_module, the title's own prx at the app root.
     if (load_packaged_module())
       return lib;
   }
 
-  LOG_ERROR("unable to load module {}", sname.c_str());
+  // The PA debugger driver shares the public Gnm ABI. Retail firmware does
+  // not ship its instrumentation build; retain the requested alias so repeated
+  // loads and imports refer to the same retail driver and handle.
+  if (!firmware_module_found && !packaged_module_found &&
+      name == base::StringRef("libSceGnmDriver_padebug")) {
+    auto retail = LoadModule(base::StringRef("libSceGnmDriver"));
+    if (retail) {
+      module_aliases_.push_back({sname, retail});
+      LOG_WARNING("{} unavailable; using retail {} (debug instrumentation unavailable)",
+                  sname.c_str(), retail->GetInfo().name.c_str());
+      return retail;
+    }
+  }
+  LOG_ERROR("unable to load module {} (firmware path: {}; application paths also checked)",
+            sname.c_str(), host_path.c_str());
   return nullptr;
 }
 void Process::Start() {
